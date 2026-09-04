@@ -1,0 +1,9 @@
+# Experience graph (P0): cases + execution tree from recorded trajectories.
+version: "1.0"
+enabled: true
+outcome:
+  policy: v1
+output:
+  directory: exgraph
+skills:
+  enabled: true
