@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 NodeType = Literal[
     "Thread",
@@ -34,6 +34,7 @@ NodeType = Literal[
     "SkillDoc",
     "Episode",
     "Recipe",
+    "Insight",
 ]
 EdgeType = Literal[
     "HAS_TASK",
@@ -47,6 +48,9 @@ EdgeType = Literal[
     "HAS_EPISODE",
     "FIXED_BY",
     "INSTANTIATES",
+    "SIMILAR_TO",
+    "INSIGHT_OF",
+    "INSIGHT_SKILL",
 ]
 StepKind = Literal["tool", "llm"]
 Outcome = Literal["golden", "warning", "unknown"]
@@ -93,6 +97,11 @@ def episode_id(thread: str, kind: str, first_seq: int) -> str:
 
 def recipe_id(ngram: list[str] | tuple[str, ...]) -> str:
     return "recipe:" + ">".join(ngram)
+
+
+def insight_id(recipe: str) -> str:
+    slug = recipe[7:] if recipe.startswith("recipe:") else recipe
+    return f"insight:{slug}"
 
 
 @dataclass(slots=True)

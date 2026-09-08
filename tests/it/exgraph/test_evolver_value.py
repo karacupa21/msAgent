@@ -79,6 +79,21 @@ def _writable_output(filename: str, tmp_path: Path, env_name: str) -> Path:
     return tmp_path / filename
 
 
+def _plant_accepted(work: Path, thread_id: str) -> None:
+    folder = work / "skills" / "msprof-kernel-profile"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "# msprof kernel profile\n\n"
+        "Always pass --application, --output and --level kernel.\n\n"
+        f"<!-- provenance thread: {thread_id} -->\n",
+        encoding="utf-8",
+    )
+    (folder / "provenance.json").write_text(
+        json.dumps({"thread_ids": [thread_id], "name": "msprof-kernel-profile"}),
+        encoding="utf-8",
+    )
+
+
 def _plant_proposal(work: Path, thread_id: str) -> None:
     folder = work / "skills" / ".proposals" / thread_id / "msprof-kernel-profile"
     folder.mkdir(parents=True)
@@ -101,6 +116,8 @@ def _facts(text: str) -> set[str]:
         "fixed_by",
         "outcome=",
         "Recipes instantiated",
+        "Similar cases:",
+        "Insights:",
         "Experience graph",
         "SkillDoc",
         "Episodes:",
@@ -160,6 +177,7 @@ def test_graph_appendix_adds_relations_not_new_evidence_seqs(corpus, tmp_path, m
     state = tmp_path / "state"
     state.mkdir()
     _plant_proposal(work, "thread-signals")
+    _plant_accepted(work, "thread-signals")
 
     traj = corpus["signals"]
     episodes = extract_episodes(traj)
@@ -185,6 +203,8 @@ def test_graph_appendix_adds_relations_not_new_evidence_seqs(corpus, tmp_path, m
     assert "### Episode" not in extra
     assert "SkillDoc" in extra
     assert "msprof-kernel-profile" in extra
+    assert "similar_to" in extra or "Similar cases:" in extra
+    assert "Insights:" in extra
     # valid_seq is still only evolver episodes
     from msagent.skill_evolver.bundle import build_evidence_bundle as rebuild
 
@@ -224,6 +244,7 @@ def test_write_value_report(corpus, tmp_path, monkeypatch) -> None:
     state = tmp_path / "state"
     state.mkdir()
     _plant_proposal(work, "thread-signals")
+    _plant_accepted(work, "thread-signals")
 
     traj = corpus["signals"]
     episodes = extract_episodes(traj)
@@ -324,6 +345,7 @@ def test_growth_html_highlights_new_over_trajectories(corpus, tmp_path, monkeypa
     state = tmp_path / "state"
     state.mkdir()
     _plant_proposal(work, "thread-signals")
+    _plant_accepted(work, "thread-signals")
 
     from msagent.exgraph.visualize import (
         demo_snapshots,

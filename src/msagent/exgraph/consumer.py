@@ -32,7 +32,7 @@ from msagent.exgraph.sources import resolve_graph_dir
 from msagent.exgraph.store import find_saved_graph, load_graph
 from msagent.exgraph.workspace import load_overlay
 
-APPENDIX_CHAR_CAP = 1000
+APPENDIX_CHAR_CAP = 1600
 
 
 def _clip(text: str, limit: int) -> str:
@@ -118,9 +118,37 @@ def render_thread_context(
     except Exception:
         recipe_nodes, recipe_edges = [], []
     case_ids = set(graph.cases)
-    hits = [edge for edge in recipe_edges if edge.get("src") in case_ids]
+    by_id = {node.get("id"): node for node in recipe_nodes}
+    similar = [
+        edge
+        for edge in recipe_edges
+        if edge.get("type") == "SIMILAR_TO"
+        and (edge.get("src") in case_ids or edge.get("dst") in case_ids)
+    ]
+    if similar:
+        lines.append("Similar cases:")
+        seen: set[str] = set()
+        for edge in similar:
+            other = edge.get("dst") if edge.get("src") in case_ids else edge.get("src")
+            key = f"{edge.get('src')}->{edge.get('dst')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(
+                f"- {edge.get('src')} similar_to {edge.get('dst')} "
+                f"tools={edge.get('tools')} tokens={edge.get('tokens')}"
+            )
+    insights = [node for node in recipe_nodes if node.get("type") == "Insight"]
+    if insights:
+        lines.append("Insights:")
+        for node in insights:
+            ngram = ">".join(str(part) for part in (node.get("ngram") or []))
+            skills = ",".join(str(name) for name in (node.get("skills") or [])[:3])
+            lines.append(
+                f"- {ngram or node.get('id')} support={node.get('support')} skills={skills}"
+            )
+    hits = [edge for edge in recipe_edges if edge.get("src") in case_ids and edge.get("type") == "INSTANTIATES"]
     if hits:
-        by_id = {node.get("id"): node for node in recipe_nodes}
         lines.append("Recipes instantiated:")
         seen: set[str] = set()
         for edge in hits:

@@ -9,3 +9,8 @@ output:
   directory: exgraph
 skills:
   enabled: true
+similar:
+  min_tools: 0.5
+  min_tokens: 0.25
+insight:
+  min_support: 2

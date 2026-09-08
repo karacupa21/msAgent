@@ -18,8 +18,8 @@
 
 """Experience graph built from recorded msAgent trajectories.
 
-P0–P1.1: one TaskAnchor per thread, Cases/Steps from the recorder, SkillDoc
-pointers, evolver Episodes + FIXED_BY + workspace Recipes. The classify
+P0–P2.0: one TaskAnchor per thread, Cases/Steps from the recorder, SkillDoc
+pointers, evolver Episodes + FIXED_BY + workspace Recipes, SIMILAR_TO, Insight. The classify
 appendix emits relations only — not a second copy of episodes.
 
 This ``__init__`` imports nothing so ``python -m msagent.exgraph.export`` stays

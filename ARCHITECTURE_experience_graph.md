@@ -1,6 +1,6 @@
 # Experience Graph — Architecture
 
-Status: P0 + P0.5 + P1 + P1.1 + **P1.2** (`src/msagent/exgraph/`), schema version 2.
+Status: P0–P1.2 + **P2.0** (`src/msagent/exgraph/`), schema version 3.
 Branch: `feature/experience-graph`.
 
 ## 1. Purpose
@@ -27,11 +27,11 @@ renaming cases.
 ## 3. Schema
 
 Nodes: `Thread`, `TaskAnchor`, `Case`, `Step`, `SubagentRun`, `SkillDoc`,
-`Episode`, workspace `Recipe`.
+`Episode`, workspace `Recipe`, workspace `Insight`.
 
 Edges: `HAS_TASK`, `CONTAINS`, `NEXT_CASE`, `HAS_STEP`, `PARENT_OF`,
 `DELEGATES`, `IN_SUBAGENT`, `DERIVED_SKILL`, `HAS_EPISODE`, `FIXED_BY`,
-`INSTANTIATES`.
+`INSTANTIATES`, `SIMILAR_TO`, `INSIGHT_OF`, `INSIGHT_SKILL`.
 
 Case payload: `x`, `y`, `r` (`golden` | `warning` | `unknown`), `sigma`
 (tool path, errors, retries, approvals, tokens).
@@ -50,7 +50,9 @@ src/msagent/exgraph/
     cases.py        L0 ingest
     skills.py       SkillDoc path scan
     enrich.py       extract_episodes + FIXED_BY
-    workspace.py    mine_cross_session overlay
+    workspace.py    mine_cross_session overlay + similar + insight
+    similar.py      SIMILAR_TO (Jaccard, same agent)
+    insight.py      Insight from accepted SkillDoc + recipe
     consumer.py     classify appendix (relations only)
     store.py        JSONL shards under <state>/exgraph/
     export.py       build | show | export | viz
@@ -94,7 +96,10 @@ P1.1 appendix contains **only relations**:
 - SkillDoc name / status / path;
 - recipes this thread instantiates (`ngram`, support, other thread ids).
 
-It does **not** repeat episode kinds. Cap 1000 characters. No `Evidence:`
+P2.0 also lists `Similar cases` (same-agent tool+text Jaccard) and
+`Insights` (accepted SkillDoc + recipe support≥2). No invented prose.
+
+It does **not** repeat episode kinds. Cap 1600 characters. No `Evidence:`
 seqs.
 
 ## 7. Default off (P1.2 merge)
@@ -110,12 +115,12 @@ Skill Evolver unless someone opts in.
 Checked live on CLI `build`, `remember_thread`, the evolver hook, and the
 appendix. Inspection `show`/`export` of an existing shard still works.
 
-## 8. Later (not this zip)
+## 8. Later
 
-`SIMILAR_TO`, Insight, `/exgraph` slash command, live retrieval,
-embeddings, graph databases, outcome policy v2 (`recovered`),
-argument-aware recipes (change `mine_cross_session`, do not fork it),
-online `finish_turn` enqueue, live `/skill-mine` quality A/B (P1.2).
+`/exgraph` slash command, live retrieval, embeddings, graph databases,
+outcome policy v2 (`recovered`), argument-aware recipes (change
+`mine_cross_session`, do not fork it), online `finish_turn` enqueue,
+live `/skill-mine` quality A/B on a real project.
 
 ## 9. CLI
 

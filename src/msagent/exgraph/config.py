@@ -56,6 +56,15 @@ class SkillScanConfig(BaseModel):
     )
 
 
+class SimilarConfig(BaseModel):
+    min_tools: float = Field(default=0.5, description="Minimum tool-path Jaccard")
+    min_tokens: float = Field(default=0.25, description="Minimum user-text token Jaccard")
+
+
+class InsightConfig(BaseModel):
+    min_support: int = Field(default=2, description="Minimum recipe support for an Insight")
+
+
 class ExgraphConfig(BaseModel):
     version: str = Field(default="1.0")
     enabled: bool = Field(
@@ -65,6 +74,8 @@ class ExgraphConfig(BaseModel):
     outcome: OutcomeConfig = Field(default_factory=OutcomeConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     skills: SkillScanConfig = Field(default_factory=SkillScanConfig)
+    similar: SimilarConfig = Field(default_factory=SimilarConfig)
+    insight: InsightConfig = Field(default_factory=InsightConfig)
 
     @property
     def is_active(self) -> bool:

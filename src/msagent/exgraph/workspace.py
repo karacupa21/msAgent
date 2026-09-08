@@ -39,6 +39,8 @@ from msagent.exgraph.schema import (
     edge_id,
     recipe_id,
 )
+from msagent.exgraph.similar import similar_edges
+from msagent.exgraph.insight import insight_nodes
 from msagent.exgraph.store import WORKSPACE_NAME, _read_jsonl, _write_jsonl
 from msagent.skill_evolver.features import FEATURES_VERSION, mine_cross_session
 from msagent.trajectory_recorder.model import Trajectory
@@ -121,6 +123,25 @@ def rebuild_overlay(
                         src=record.id,
                         dst=nid,
                     ).to_dict()
+    graph_list = list(by_id.values())
+    try:
+        from msagent.exgraph.config import load_exgraph_config
+
+        cfg = load_exgraph_config()
+        min_tools = cfg.similar.min_tools
+        min_tokens = cfg.similar.min_tokens
+        min_support = cfg.insight.min_support
+    except Exception:
+        min_tools, min_tokens, min_support = 0.5, 0.25, 2
+    for edge in similar_edges(graph_list, min_tools=min_tools, min_tokens=min_tokens):
+        edges[edge.id] = edge.to_dict()
+    extra_nodes, extra_edges = insight_nodes(
+        list(nodes.values()), graph_list, min_support=min_support
+    )
+    for node in extra_nodes:
+        nodes[node.id] = node.to_dict()
+    for edge in extra_edges:
+        edges[edge.id] = edge.to_dict()
     _write_jsonl(directory / "nodes.jsonl", list(nodes.values()))
     _write_jsonl(directory / "edges.jsonl", list(edges.values()))
     manifest = {
