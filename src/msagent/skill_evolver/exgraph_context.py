@@ -17,12 +17,16 @@
 # -------------------------------------------------------------------------
 
 
-"""Fail-open bridge: stored experience graph → classify bundle appendix.
+"""Fail-open bridge: stored experience graph → classify evidence text.
 
-The last-N trajectory pool (``CROSS_SESSION_LIMIT`` / ``select_trajectories``)
-is untouched. This module never calls ``load_trajectories``. If the graph
-package is missing or a shard cannot be written, the original bundle is
-returned unchanged so skill mining keeps its current behaviour.
+Modes (``config.exgraph.yml`` / ``MSAGENT_EXGRAPH_EVIDENCE_MODE``):
+
+- ``episodes`` — original bundle, no shard write (evolver first pass)
+- ``hybrid`` — persist shard, append relation appendix (default when on)
+- ``graph`` — persist shard, relations first, bundle as supporting tail
+
+The last-N trajectory pool is untouched. This module never calls
+``load_trajectories``. Failures return the original bundle.
 """
 
 from __future__ import annotations
@@ -42,19 +46,29 @@ def attach_stored_graph(
     working_dir: Path | None = None,
     state_dir: Path | None = None,
 ) -> str:
-    """Persist this thread's graph (no pool) and append a stored-graph section.
-
-    ``MSAGENT_EXGRAPH_DISABLED=1`` (or ``enabled: false`` in config) returns
-    ``bundle_text`` unchanged and writes nothing.
-    """
+    """Apply ``evidence_mode`` to the classify string. Never raises."""
     try:
-        from msagent.exgraph.config import is_exgraph_enabled
+        from msagent.exgraph.config import resolve_evidence_mode
 
-        if not is_exgraph_enabled():
+        mode = resolve_evidence_mode()
+        if mode == "episodes":
             return bundle_text
         from msagent.exgraph.enrich import remember_thread
 
         remember_thread(trajectory, working_dir=working_dir, state_dir=state_dir)
+        if mode == "graph":
+            from msagent.exgraph.consumer import render_graph_primary
+
+            extra = render_graph_primary(
+                trajectory.thread_id,
+                working_dir=working_dir,
+                state_dir=state_dir,
+            )
+            if not extra:
+                return bundle_text
+            if not bundle_text.strip():
+                return extra
+            return extra + "\n\n## Episode bundle (supporting, citable)\n\n" + bundle_text
         from msagent.exgraph.consumer import render_thread_context
 
         extra = render_thread_context(

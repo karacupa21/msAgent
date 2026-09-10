@@ -108,10 +108,24 @@ def test_outcome_override_fail() -> None:
 
 
 def test_label_policy_unit() -> None:
-    clean = Turn(run_id="r", seq_start=1, line_start=1, user_message="go", source="dispatch", status="completed")
+    clean = Turn(
+        run_id="r",
+        seq_start=1,
+        line_start=1,
+        user_message="go",
+        source="dispatch",
+        status="completed",
+    )
     assert label_outcome(clean) == "unknown"
     assert label_outcome(clean, override="success") == "golden"
-    failed = Turn(run_id="r", seq_start=1, line_start=1, user_message="go", source="dispatch", status="error")
+    failed = Turn(
+        run_id="r",
+        seq_start=1,
+        line_start=1,
+        user_message="go",
+        source="dispatch",
+        status="error",
+    )
     assert label_outcome(failed, override="success") == "warning"
 
 

@@ -18,12 +18,12 @@
 
 """Attach SkillDoc nodes when a generated skill cites this thread.
 
-P0.5 looks at Skill Evolver artifacts by path only; it imports only
-``skill_evolver.config`` lazily (stdlib+yaml+pydantic, no pipeline modules):
+P0.5 looks at Skill Evolver artifacts by path only (no import of
+``skill_evolver``):
 
 - ``<working_dir>/skills/.proposals/<thread>/`` (current writer root)
 - ``<output_dir>/.proposals/<thread>/`` when ``config.skill.evolver.yml``
-  sets ``generation.output_dir`` (config loader, fail-open)
+  sets ``output_dir`` (YAML read, fail-open)
 - ``<working_dir>/.proposals/<thread>/`` (legacy P0 path, still accepted)
 - accepted library skills under ``skills/**/SKILL.md`` whose
   ``provenance.json`` or footer lists this thread
@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FOOTER_THREAD = re.compile(r"thread:\s*([A-Za-z0-9._-]+)")
+_EVOLVER_CONFIG = "config.skill.evolver.yml"
 SkillStatus = Literal["proposal", "accepted"]
 
 
@@ -84,14 +85,34 @@ def _cites_thread(path: Path, thread_id: str) -> bool:
 
 
 def _evolver_output_dir(working_dir: Path) -> Path | None:
-    """Skill Evolver output_dir through the config loader; fail-open, a missing config is normal."""
+    """Read Skill Evolver output_dir from YAML only. Missing config is normal."""
+    candidates: list[Path] = []
     try:
-        from msagent.skill_evolver.config import load_skill_evolver_config, resolve_output_dir
+        from msagent.core.paths import AppPaths
 
-        return resolve_output_dir(load_skill_evolver_config(), working_dir)
+        candidates.append(AppPaths.resolve().config_dir / _EVOLVER_CONFIG)
     except Exception:
-        logger.debug("Cannot read skill-evolver output_dir", exc_info=True)
-        return None
+        logger.debug("Cannot resolve msAgent home for skill-evolver config", exc_info=True)
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            import yaml
+
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            logger.debug("Ignoring unreadable %s", path, exc_info=True)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        raw = payload.get("output_dir")
+        if not raw:
+            return None
+        output = Path(str(raw)).expanduser()
+        if not output.is_absolute():
+            output = working_dir / output
+        return output
+    return None
 
 
 def _unique_dirs(*dirs: Path | None) -> list[Path]:

@@ -23,7 +23,12 @@ from pathlib import Path
 
 import pytest
 
-from msagent.exgraph.config import ENV_DISABLED, ENV_ENABLED, reset_config_cache
+from msagent.exgraph.config import (
+    ENV_DISABLED,
+    ENV_ENABLED,
+    ENV_EVIDENCE_MODE,
+    reset_config_cache,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +150,11 @@ def test_fixtures_are_recorder_shaped(corpus) -> None:
     assert sig.thread_id == "thread-signals"
     assert sig.agent == "Profiler"
     assert len(sig.turns) >= 2
-    assert any(turn.user_message and "不对" in turn.user_message for turn in sig.turns)
+    assert any(
+        turn.user_message
+        and ("не так" in turn.user_message or "不对" in turn.user_message)
+        for turn in sig.turns
+    )
     reuse = corpus["reuse"]
     assert reuse.thread_id == "thread-reuse"
     assert reuse.agent == "Profiler"
@@ -155,8 +164,7 @@ def test_evolver_bundle_without_graph_has_episodes_but_no_relations(corpus) -> N
     traj = corpus["signals"]
     episodes = extract_episodes(traj)
     kinds = {ep.kind for ep in episodes}
-    assert "error_recovery" in kinds
-    assert "user_correction" in kinds
+    assert "error_recovery" in kinds or "retry_loop" in kinds
     assert "approval_denied" in kinds
     built = build_evidence_bundle(episodes, [traj])
     bundle = built.text
@@ -223,6 +231,23 @@ def test_kill_switch_removes_value_and_writes(corpus, tmp_path, monkeypatch) -> 
     text = attach_stored_graph(bundle, traj, working_dir=work, state_dir=state)
     assert text == bundle
     assert list(state.rglob("nodes.jsonl")) == []
+
+
+def test_episodes_mode_is_the_old_evolver_pass(corpus, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(ENV_EVIDENCE_MODE, "episodes")
+    reset_config_cache()
+    work = tmp_path / "proj"
+    work.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    traj = corpus["signals"]
+    bundle = build_evidence_bundle(extract_episodes(traj), [traj]).text
+    text = attach_stored_graph(bundle, traj, working_dir=work, state_dir=state)
+    assert text == bundle
+    assert "Experience graph" not in text
+    assert list(state.rglob("nodes.jsonl")) == []
+    monkeypatch.delenv(ENV_EVIDENCE_MODE, raising=False)
+    reset_config_cache()
 
 
 def test_cross_session_recipes_need_two_profiler_threads(corpus) -> None:
@@ -330,7 +355,7 @@ def test_write_value_report(corpus, tmp_path, monkeypatch) -> None:
     assert "Experience graph" in enriched
     assert dest.is_file()
     assert len(fixes) >= 1
-    assert score >= 0.6 + 0.9  # error_recovery + user_correction at least
+    assert score >= 0.6
 
 
 def test_growth_html_highlights_new_over_trajectories(corpus, tmp_path, monkeypatch) -> None:

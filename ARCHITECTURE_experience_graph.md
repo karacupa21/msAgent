@@ -1,6 +1,6 @@
 # Experience Graph — Architecture
 
-Status: P0–P1.2 + **P2.0** (`src/msagent/exgraph/`), schema version 3.
+Status: P0–P2.0 + **P2.1** (`evidence_mode` on the evolver hook), schema version 3.
 Branch: `feature/experience-graph`.
 
 ## 1. Purpose
@@ -84,10 +84,19 @@ overlay** of recipes + accepted SkillDocs. That is not P1.1.
 Detectors stay in `skill_evolver.features`. Exgraph only materializes
 them. `select_trajectories` / `CROSS_SESSION_LIMIT=20` stay evolver-owned.
 
-After the evolver builds its episode bundle it calls
-`attach_stored_graph`: persist this thread (no extra JSONL pool) and
-append the stored-graph section. Fail-open. `valid_seq` remains the
-evolver episode seqs.
+After the evolver builds its episode bundle, `pipeline.run_thread`
+calls `attach_stored_graph` (the only hook). Fail-open. `valid_seq`
+remains the evolver episode seqs. Mode is **not** on
+`config.skill.evolver.yml` (`extra: forbid`).
+
+| `evidence_mode` | Classify string |
+|---|---|
+| `episodes` | original bundle; no shard |
+| `hybrid` | bundle + relation appendix (default when the graph is on) |
+| `graph` | relations first, then `## Episode bundle (supporting, citable)` |
+
+`MSAGENT_EXGRAPH_EVIDENCE_MODE` overrides YAML. Disabled / kill switch
+forces `episodes`.
 
 P1.1 appendix contains **only relations**:
 
@@ -117,10 +126,10 @@ appendix. Inspection `show`/`export` of an existing shard still works.
 
 ## 8. Later
 
-`/exgraph` slash command, live retrieval, embeddings, graph databases,
-outcome policy v2 (`recovered`), argument-aware recipes (change
-`mine_cross_session`, do not fork it), online `finish_turn` enqueue,
-live `/skill-mine` quality A/B on a real project.
+Insight LLM persist after classify (`CountingLlm`, P2.1b), BM25 text
+similar via `skill_evolver.retrieval.tokenize` (P2.3), live `/skill-mine`
+A/B (P2.2), argument-aware `mine_cross_session`, outcome `recovered`,
+`finish_turn` enqueue, dense+RRF, `/exgraph` slash command.
 
 ## 9. CLI
 

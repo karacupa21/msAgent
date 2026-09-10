@@ -170,3 +170,53 @@ def render_thread_context(
     if len(lines) <= 3:
         return ""
     return _cap_lines(lines)
+
+
+def render_graph_primary(
+    thread_id: str,
+    *,
+    working_dir: Path | None = None,
+    state_dir: Path | None = None,
+) -> str:
+    """Graph-first classify body: relations first, episode kinds without seqs.
+
+    Used only when ``evidence_mode=graph``. Does not invent ``Evidence:`` or
+    ``[evN]`` fragments. Episode kinds come from stored Episode nodes.
+    """
+    body = render_thread_context(
+        thread_id, working_dir=working_dir, state_dir=state_dir
+    )
+    kinds: list[str] = []
+    try:
+        from msagent.exgraph.config import is_exgraph_enabled
+
+        if is_exgraph_enabled():
+            root = resolve_graph_dir(working_dir=working_dir, state_dir=state_dir)
+            saved = find_saved_graph(root, thread_id)
+            if saved is not None:
+                graph = load_graph(saved)
+                seen: set[str] = set()
+                for node in graph.nodes.values():
+                    if node.type != "Episode":
+                        continue
+                    kind = str(node.attrs.get("kind") or "")
+                    if kind and kind not in seen:
+                        seen.add(kind)
+                        kinds.append(kind)
+    except Exception:
+        kinds = []
+    header = [
+        "## Experience graph (primary)",
+        "",
+        "Relations below are context, not citable evidence.",
+    ]
+    if body:
+        rest = body.split("\n", 1)[-1] if body.startswith("## ") else body
+        header.append(rest.lstrip("\n"))
+    if kinds:
+        header.append("Episode index (not citable):")
+        header.extend(f"- {kind}" for kind in kinds)
+    text = "\n".join(header).strip()
+    if "Experience graph" not in text and not kinds:
+        return ""
+    return _cap_lines(text.split("\n"))
