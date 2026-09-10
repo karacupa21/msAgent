@@ -145,7 +145,7 @@ def test_fixtures_are_recorder_shaped(corpus) -> None:
     assert sig.thread_id == "thread-signals"
     assert sig.agent == "Profiler"
     assert len(sig.turns) >= 2
-    assert any(turn.user_message and "не так" in turn.user_message for turn in sig.turns)
+    assert any(turn.user_message and "不对" in turn.user_message for turn in sig.turns)
     reuse = corpus["reuse"]
     assert reuse.thread_id == "thread-reuse"
     assert reuse.agent == "Profiler"

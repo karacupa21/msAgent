@@ -471,17 +471,17 @@ def test_snippet_replaces_the_record_head() -> None:
 
 def test_correction_snippet_reaches_the_bundle() -> None:
     # The correcting phrase sits after the first 600 characters of the message.
-    message = "context " * 80 + "нет, не так: сначала запусти профилировщик" + " tail" * 20
+    message = "context " * 80 + "不对：首先运行性能分析器" + " tail" * 20
     traj = _traj(
         _turn("run-1", 2, "do it", [_call("bash", {}, seq=4)]),
         _turn("run-2", 10, message, []),
     )
-    assert message.index("не так") > 600
+    assert message.index("不对") > 600
 
     bundle = build_evidence_bundle(extract_episodes(traj), [traj])
 
     (correction,) = [f for f in bundle.shown.values() if f.role == "correction"]
-    assert "не так: сначала запусти профилировщик" in correction.text
+    assert "不对：首先运行性能分析器" in correction.text
     assert correction.text.startswith(f"user: {ELLIPSIS}")
     assert correction.text in bundle.text
 

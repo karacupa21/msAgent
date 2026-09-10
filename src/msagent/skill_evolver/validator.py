@@ -68,8 +68,8 @@ MIN_WORKFLOW_STEPS = 1
 FOLKLORE_PHRASES = (
     "is broken",
     "does not work",
-    "не работает",
-    "сломан",
+    "不工作",
+    "坏了",
 )
 # Secret-looking values a SKILL.md or a provenance record must never carry.
 # Each pattern is (label, regex); the assignment rule captures the value as

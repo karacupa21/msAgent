@@ -36,20 +36,42 @@ DOCS = [
 
 
 def test_tokenize_splits_casefolds_and_drops_stopwords() -> None:
-    assert tokenize("Cluster-Analysis of the Профиль, v2!") == [
+    assert tokenize("Cluster-Analysis of the 性能剖析, v2!") == [
         "cluster",
         "analysis",
-        "профиль",
+        "性能",
+        "能剖",
+        "剖析",
         "v2",
     ]
 
 
 def test_tokenize_drops_short_tokens_and_splits_underscores() -> None:
-    assert tokenize("read_file x 42 и для") == ["read", "file", "42"]
+    assert tokenize("read_file x 42 的 和") == ["read", "file", "42"]
 
 
 def test_stopwords_cover_both_languages() -> None:
-    assert {"the", "and", "with", "и", "для", "не"} <= STOPWORDS
+    assert {"the", "and", "with", "的", "了", "不"} <= STOPWORDS
+
+
+def test_tokenize_cuts_han_runs_into_bigrams() -> None:
+    # Chinese is not space-delimited: a run is one phrase, indexed as bigrams,
+    # and a stopword drops out without cutting the compound written around it.
+    assert tokenize("分析配置文件的性能") == ["分析", "析配", "配置", "置文", "文件", "件的", "的性", "性能"]
+    # A one-character run stays a unigram, and drops out when it is a stopword.
+    assert tokenize("很慢 的 x") == ["很慢"]
+
+
+def test_search_matches_a_chinese_description() -> None:
+    docs = [
+        SkillDoc("profiling-bottleneck", "用 msprof 分析训练性能并定位内核瓶颈"),
+        SkillDoc("dit-quant", "量化 DiT 扩散模型"),
+    ]
+
+    (hit,) = BM25Index(docs).search("性能分析")
+
+    assert hit.doc.name == "profiling-bottleneck"
+    assert hit.matched == ("分析", "性能")
 
 
 def test_search_ranks_by_shared_rare_terms_and_reports_matches() -> None:
@@ -70,7 +92,7 @@ def test_search_edge_cases() -> None:
     index = BM25Index(DOCS)
 
     assert index.search("") == []
-    assert index.search("the and с") == []
+    assert index.search("the and 的") == []
     assert index.search("nothing shared here") == []
     assert len(index.search("models")) == 2
     assert len(index.search("models", top_k=1)) == 1

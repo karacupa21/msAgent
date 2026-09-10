@@ -36,20 +36,46 @@ from dataclasses import dataclass
 _STOPWORD_TEXT = (
     "a an the and or of to in on for with is are be it this that as by at from "
     "use when you your not if then into how what which can will do does have has "
-    "и в на с по для не что это как из к у о от а но или за то же бы он она они "
-    "мы вы я ты так все всё его её их нет да ли при без до про уже"
+    "的 了 是 在 和 与 或 我 你 他 她 它 我们 你们 他们 这 那 这个 那个 "
+    "就 也 都 很 不 有 会 能 可以 什么 怎么 如果 然后 一个 已经 需要"
 )
 STOPWORDS: frozenset[str] = frozenset(_STOPWORD_TEXT.split())
 
-# Runs of letters/digits; "_" and "-" split tokens (read_file -> read, file).
-_TOKEN_RE = re.compile(r"[^\W_]+")
+# Han characters (CJK Unified Ideographs and Ext. A).
+_HAN = r"㐀-䶿一-鿿"
+# A Han run, or a run of other letters/digits; "_" and "-" split tokens
+# (read_file -> read, file). Han is taken apart from the rest because Chinese
+# is not space-delimited: such a run is a whole phrase, not one word.
+_TOKEN_RE = re.compile(rf"[{_HAN}]+|(?:(?![{_HAN}])[^\W_])+")
+_HAN_RE = re.compile(rf"[{_HAN}]")
 _MIN_TOKEN_CHARS = 2
 
 
+def _han_tokens(run: str) -> list[str]:
+    """Overlapping bigrams of one Han run (the Lucene CJK scheme, no dictionary).
+
+    A one-character run stays a unigram. Stopwords are dropped by the caller
+    and never cut the run, so a compound written around one keeps its bigram
+    ("性能" survives inside "文件的性能").
+    """
+    if len(run) == 1:
+        return [run]
+    return [run[index : index + 2] for index in range(len(run) - 1)]
+
+
 def tokenize(text: str) -> list[str]:
-    """Lowercase word tokens of ``text`` without stopwords and 1-char tokens."""
-    tokens = _TOKEN_RE.findall(text.casefold())
-    return [t for t in tokens if len(t) >= _MIN_TOKEN_CHARS and t not in STOPWORDS]
+    """Lowercase tokens of ``text``: Han runs as bigrams, the rest as words.
+
+    Stopwords drop out of both; a non-Han token shorter than
+    ``_MIN_TOKEN_CHARS`` drops too (a lone Han character is a word).
+    """
+    tokens: list[str] = []
+    for token in _TOKEN_RE.findall(text.casefold()):
+        if _HAN_RE.match(token):
+            tokens.extend(t for t in _han_tokens(token) if t not in STOPWORDS)
+        elif len(token) >= _MIN_TOKEN_CHARS and token not in STOPWORDS:
+            tokens.append(token)
+    return tokens
 
 
 @dataclass(frozen=True, slots=True)

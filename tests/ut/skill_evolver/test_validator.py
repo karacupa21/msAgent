@@ -284,8 +284,8 @@ NEGATIVE_CASES = [
     pytest.param(_skill(extra="## Examples\n"), "Examples: section is empty", id="examples-empty"),
     pytest.param(_skill(outputs="The linter is broken."), "folklore 'is broken'", id="folklore-broken"),
     pytest.param(_skill(outputs="It does not work."), "folklore 'does not work'", id="folklore-work"),
-    pytest.param(_skill(outputs="Модуль НЕ РАБОТАЕТ."), "negative tool folklore", id="folklore-ru-1"),
-    pytest.param(_skill(outputs="Сломана сборка."), "negative tool folklore", id="folklore-ru-2"),
+    pytest.param(_skill(outputs="这个模块不工作。"), "negative tool folklore", id="folklore-zh-1"),
+    pytest.param(_skill(outputs="构建坏了。"), "negative tool folklore", id="folklore-zh-2"),
     pytest.param(
         _skill(description="Use when the build is broken."),
         "negative tool folklore",
@@ -357,7 +357,7 @@ def test_folklore_error_names_the_line() -> None:
 
 
 def test_folklore_phrases_are_the_specified_ones() -> None:
-    assert FOLKLORE_PHRASES == ("is broken", "does not work", "не работает", "сломан")
+    assert FOLKLORE_PHRASES == ("is broken", "does not work", "不工作", "坏了")
     assert DESCRIPTION_PREFIX == "Use when "
 
 

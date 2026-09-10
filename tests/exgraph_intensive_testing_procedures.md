@@ -88,7 +88,7 @@ All three files are recorder v1 JSONL (same schema as
 
 | File | Thread | Agent | Story |
 | --- | --- | --- | --- |
-| `tests/fixtures/trajectories/skill_evolver_signals.jsonl` | `thread-signals` | Profiler | Wrong `msprof` flags, tool error, RU user correction (“не так”), denied write. Source of episodes + `FIXED_BY`. |
+| `tests/fixtures/trajectories/skill_evolver_signals.jsonl` | `thread-signals` | Profiler | Wrong `msprof` flags, tool error, ZH user correction (“不对”), denied write. Source of episodes + `FIXED_BY`. |
 | `tests/fixtures/trajectories/exgraph_reuse.jsonl` | `thread-reuse` | Profiler | Same task, correct flags on the first try (`bash` → `read_file` → `grep`). Makes a repeated-procedure n-gram with `thread-signals`. |
 | `tests/fixtures/trajectories/exgraph_accuracy.jsonl` | `thread-accuracy` | Accuracy | NaN / overflow dump. Control: must not own Profiler recipes. |
 

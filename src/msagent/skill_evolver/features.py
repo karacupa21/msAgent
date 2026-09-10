@@ -177,15 +177,15 @@ DROP_ERROR_IN_OUTPUT = "error_in_output"
 DROP_CHAIN_LIMIT = "chain_limit"
 DROP_DUPLICATE = "duplicate_chain"
 
-# Explicit corrective instructions (ru + en), matched case-insensitively as
+# Explicit corrective instructions (en + zh), matched case-insensitively as
 # substrings of the user message; with an observed change of the agent's
 # actions they make a strong correction.
 STRONG_CORRECTION_MARKERS: tuple[str, ...] = (
-    "не так",
-    "нет,",
-    "надо было",
-    "нужно было",
-    "неправильно",
+    "不对",
+    "不，",
+    "应该先",
+    "本来应该",
+    "错了",
     "no, ",
     "should have",
     "instead",
@@ -194,13 +194,16 @@ STRONG_CORRECTION_MARKERS: tuple[str, ...] = (
 # strong correction.
 WEAK_CORRECTION_MARKERS: tuple[str, ...] = (
     "actually",
-    "сначала",
-    "вообще-то",
+    "首先",
+    "其实",
     "rather",
 )
-# Negations correct only when they open the message ("Нет, не так");
-# elsewhere ("если нет, создай его") they are ordinary text.
-OPENING_MARKERS: frozenset[str] = frozenset({"нет,", "no, "})
+# Negations correct only when they open the message ("不，不对");
+# elsewhere ("先看日志，不，先看配置") they are ordinary text.
+OPENING_MARKERS: frozenset[str] = frozenset({"不，", "no, "})
+# Han characters (CJK Unified Ideographs and Ext. A); Chinese is not
+# space-delimited, so a marker starting with one carries no word-start guard.
+_HAN_RE = re.compile(r"[㐀-䶿一-鿿]")
 
 # Catalog / introspection tools: not domain work, so they never count as
 # evidence that a session did something a skill describes and are not steps
@@ -677,15 +680,19 @@ def _collapse(text: str) -> str:
 def _markers(text: str) -> list[tuple[str, int]]:
     """Correction markers found in the collapsed text with their positions, strong ones first.
 
-    A marker must start a word (``интернет,`` is not ``нет,``), and an
-    OPENING_MARKERS negation must start the message. Matching is
-    case-insensitive on the collapsed text itself (not a casefolded copy,
-    whose length may differ), so positions index :func:`_collapse` output.
+    A marker must start a word (``internet,`` is not ``no,``) unless it opens
+    with a Han character: Chinese is not space-delimited, so ``这不对`` does
+    carry ``不对``. An OPENING_MARKERS negation must start the message.
+    Matching is case-insensitive on the collapsed text itself (not a casefolded
+    copy, whose length may differ), so positions index :func:`_collapse` output.
     """
     normalized = _collapse(text)
     found: list[tuple[str, int]] = []
     for marker in (*STRONG_CORRECTION_MARKERS, *WEAK_CORRECTION_MARKERS):
-        prefix = "^" if marker in OPENING_MARKERS else r"(?<!\w)"
+        if marker in OPENING_MARKERS:
+            prefix = "^"
+        else:
+            prefix = "" if _HAN_RE.match(marker) else r"(?<!\w)"
         match = re.search(prefix + re.escape(marker), normalized, re.IGNORECASE)
         if match:
             found.append((marker, match.start()))

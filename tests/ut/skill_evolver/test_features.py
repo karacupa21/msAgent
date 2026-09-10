@@ -343,10 +343,10 @@ def test_diff_window_keeps_changed_tail() -> None:
 
 
 def test_markers_report_positions_in_collapsed_text() -> None:
-    found = features_mod._markers("x" * 10 + "\n\n  Нет, не так,  actually")
-    assert found[0] == ("не так", 16)
-    assert [marker for marker, _ in found] == ["не так", "actually"]
-    assert features_mod._markers("Нет, не так")[:2] == [("не так", 5), ("нет,", 0)]
+    found = features_mod._markers("x" * 10 + "\n\n  不，不对，  actually")
+    assert found[0] == ("不对", 13)
+    assert [marker for marker, _ in found] == ["不对", "actually"]
+    assert features_mod._markers("不，不对")[:2] == [("不对", 2), ("不，", 0)]
 
 
 def test_episode_weights_cover_all_kinds() -> None:
@@ -553,10 +553,10 @@ def test_error_recovery_continues_into_a_resume_turn_only() -> None:
 @pytest.mark.parametrize(
     ("message", "markers"),
     [
-        ("Нет, не так — сначала посмотри summary", ["не так", "нет,", "сначала"]),
+        ("不，不对 —— 首先看 summary", ["不对", "不，", "首先"]),
         ("No, you should have used grep", ["no, ", "should have"]),
         ("Actually, run pytest instead", ["instead", "actually"]),
-        ("Надо было проверить логи", ["надо было"]),
+        ("应该先检查日志", ["应该先"]),
     ],
 )
 def test_user_correction_positive(message: str, markers: list[str]) -> None:
@@ -587,45 +587,51 @@ def test_user_correction_positive(message: str, markers: list[str]) -> None:
 def test_user_correction_negative_cases() -> None:
     before = _turn("run-1", 2, "do it", [_call("bash", {"cmd": "a"}, seq=4)])
     # Gratitude is not a correction even when the tools differ.
-    thanks = _turn("run-2", 10, "спасибо, всё работает", [_call("grep", {}, seq=12)])
+    thanks = _turn("run-2", 10, "谢谢，都正常", [_call("grep", {}, seq=12)])
     assert extract_episodes(_traj(before, thanks)) == []
     # A marker without a change of action is just grumbling.
-    grumble = _turn("run-2", 10, "нет, не так", [_call("bash", {"cmd": "a"}, seq=12)])
+    grumble = _turn("run-2", 10, "不，不对", [_call("bash", {"cmd": "a"}, seq=12)])
     assert extract_episodes(_traj(before, grumble)) == []
     # A resumed turn carries no user message and cannot correct anything.
     resume = _turn("run-2", 10, None, [_call("grep", {}, seq=12)], source="resume")
     assert extract_episodes(_traj(before, resume)) == []
     # The very first user turn has no predecessor; the prelude does not count.
     prelude = _turn(PRELUDE_RUN_ID, 1, None, [], source="prelude")
-    first = _turn("run-1", 2, "нет, не так", [_call("bash", {}, seq=4)])
+    first = _turn("run-1", 2, "不，不对", [_call("bash", {}, seq=4)])
     assert extract_episodes(_traj(first)) == []
     assert extract_episodes(_traj(prelude, first)) == []
 
 
 def test_user_correction_markers_start_a_word_and_negations_open_the_message() -> None:
-    before = _turn("run-1", 2, "покажи файлы", [_call("bash", {"cmd": "ls"}, seq=4)])
-    # "интернет," is not "нет,": a marker has to start a word.
+    before = _turn("run-1", 2, "看文件", [_call("bash", {"cmd": "ls"}, seq=4)])
+    # "arduino," is not "no, ": in a space-delimited script a marker has to
+    # start a word.
     inside = _turn(
         "run-2",
         10,
-        "Проверь интернет, потом запусти тест",
+        "Check the arduino, then run the test",
         [_call("grep", {"pattern": "x"}, seq=12)],
     )
     assert extract_episodes(_traj(before, inside)) == []
-    # "если нет, создай" is an ordinary instruction: a negation corrects
+    # Chinese has no such boundary, so a Han marker is found mid-sentence:
+    # "这不对" does carry "不对".
+    han = _turn("run-2", 10, "这不对，用 grep 搜索", [_call("grep", {"pattern": "x"}, seq=12)])
+    (found,) = extract_episodes(_traj(before, han))
+    assert found.facts["markers"] == ["不对"]
+    # "如果不，就创建它" is an ordinary instruction: a negation corrects
     # only when it opens the message.
     middle = _turn(
         "run-2",
         10,
-        "Проверь лог; если нет, создай его",
+        "检查日志；如果不，就创建它",
         [_call("write_file", {"path": "log.txt"}, seq=12)],
     )
     assert extract_episodes(_traj(before, middle)) == []
-    opening = _turn("run-2", 10, "Нет, покажи логи", [_call("grep", {"pattern": "x"}, seq=12)])
+    opening = _turn("run-2", 10, "不，看日志", [_call("grep", {"pattern": "x"}, seq=12)])
 
     (episode,) = extract_episodes(_traj(before, opening))
 
-    assert episode.facts["markers"] == ["нет,"]
+    assert episode.facts["markers"] == ["不，"]
     assert episode.facts["strength"] == "strong"
 
 
@@ -634,7 +640,7 @@ def test_user_correction_ignores_normalized_equal_arguments() -> None:
     first = _call("read_file", {"path": "./cfg/dev.yml", "limit": 10}, seq=4)
     second = _call("read_file", {"path": "cfg/dev.yml", "limit": 50}, seq=12)
     before = _turn("run-1", 2, "read it", [first])
-    after = _turn("run-2", 10, "нет, не так", [second])
+    after = _turn("run-2", 10, "不，不对", [second])
     assert extract_episodes(_traj(before, after)) == []
 
 
@@ -663,7 +669,7 @@ def test_user_correction_clips_text_and_accepts_marker_anywhere() -> None:
 def test_user_correction_cites_the_changed_calls_as_context() -> None:
     long_path = "a/" * 200 + "old.yml"
     before = _turn("run-1", 2, "read the config", [_call("read_file", {"path": long_path}, seq=4)])
-    after = _turn("run-2", 10, "нет, не так", [_call("read_file", {"path": long_path[:-7] + "new.yml"}, seq=12)])
+    after = _turn("run-2", 10, "不，不对", [_call("read_file", {"path": long_path[:-7] + "new.yml"}, seq=12)])
 
     (episode,) = extract_episodes(_traj(before, after))
 
@@ -683,7 +689,7 @@ def test_user_correction_records_a_path_change_of_the_same_tool() -> None:
         _turn(
             "run-2",
             10,
-            "Нет, не так: надо было читать cfg/prod.yml",
+            "不，不对：应该先读 cfg/prod.yml",
             [_call("read_file", {"path": "cfg/prod.yml"}, seq=12)],
         ),
     )
@@ -692,7 +698,7 @@ def test_user_correction_records_a_path_change_of_the_same_tool() -> None:
 
     assert episode.kind == "user_correction"
     assert episode.facts["strength"] == "strong"
-    assert episode.facts["markers"] == ["не так", "нет,", "надо было"]
+    assert episode.facts["markers"] == ["不对", "不，", "应该先"]
     assert episode.facts["changes"] == {
         "tools_added": [],
         "tools_removed": [],
@@ -731,7 +737,7 @@ def test_user_correction_compares_turn_groups() -> None:
         _turn(
             "run-3",
             20,
-            "Нет, не так — ищи через grep",
+            "不，不对 —— 用 grep 搜索",
             [_call("grep", {"pattern": "b"}, seq=22)],
         ),
     )
@@ -1379,7 +1385,7 @@ def test_signals_fixture_end_to_end() -> None:
     assert recovery.anchors == ["run-1#4", "run-1#10"]
     assert second.anchors == ["run-1#7", "run-1#10"]
     assert correction.facts["strength"] == "strong"
-    assert correction.facts["markers"] == ["не так", "нет,", "надо было", "сначала"]
+    assert correction.facts["markers"] == ["不对", "不，", "首先"]
     assert correction.facts["tools_before"] == ["bash", "bash", "bash", "read_file"]
     # The group of run-2 includes the resume turn run-3.
     assert correction.facts["tools_after"] == ["bash", "grep", "bash", "ls"]
@@ -1588,7 +1594,7 @@ def test_shared_turn_does_not_merge_incidents() -> None:
         _turn(
             "run-2",
             10,
-            "Нет, не так — надо было искать через grep",
+            "不，不对 —— 应该先用 grep 搜索",
             [_call("grep", {"pattern": "b"}, seq=12), _call("ls", {}, seq=16)],
             approvals=[denied],
         ),
@@ -1657,7 +1663,7 @@ def test_strong_correction_passes_the_default_gate() -> None:
         _turn(
             "run-2",
             10,
-            "Нет, не так — надо было grep",
+            "不，不对 —— 应该先用 grep",
             [_call("grep", {"pattern": "b"}, seq=12)],
         ),
     )
@@ -2157,7 +2163,7 @@ def test_gate_decision_demo_override_only_when_ordinary_rules_fail() -> None:
     assert (reached.passes, reached.reason, reached.detail) == (True, GATE_SCORE_REACHED, "")
     correcting = _traj(
         _turn("run-1", 2, "do it", [_call("bash", {"cmd": "a"}, seq=4)]),
-        _turn("run-2", 10, "Нет, не так — надо было grep", [_call("grep", {"pattern": "b"}, seq=12)]),
+        _turn("run-2", 10, "不，不对 —— 应该先用 grep", [_call("grep", {"pattern": "b"}, seq=12)]),
     )
     (correction,) = extract_episodes(correcting)
     strong = gate_decision([correction], min_score=DEFAULT_MIN_EVIDENCE_SCORE, demo=True)

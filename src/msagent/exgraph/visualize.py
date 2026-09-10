@@ -326,7 +326,7 @@ def demo_snapshots() -> list[dict[str, Any]]:
     prev = None
     cases = [
         ("run-1", "warning", "Profile the training run and find the bottleneck", ["bash", "bash", "bash", "read_file"]),
-        ("run-2", "unknown", "Нет, не так: kernel-level профиль", ["bash", "grep"]),
+        ("run-2", "unknown", "No, kernel-level profile, not summary", ["bash", "grep"]),
         ("run-3", "unknown", "continue", ["bash", "ls"]),
     ]
     span = {"run-1": ["s2", "s4", "s6", "s8"], "run-2": ["s11", "s13"], "run-3": ["s16", "s18"]}

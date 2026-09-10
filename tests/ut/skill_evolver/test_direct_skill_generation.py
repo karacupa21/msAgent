@@ -176,7 +176,7 @@ def pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_llm_cls):
     state = _Pipeline(DirectSkillGenerationHandler(_session(tmp_path)), spy, trajectories_dir, fake_llm_cls)
 
     async def fake_load_history(_session, _target):
-        return THREAD_ID, [HumanMessage(content="профилируй")]
+        return THREAD_ID, [HumanMessage(content="分析性能")]
 
     async def fake_stage_prompt(self, _root, _cfg, stage):
         templates = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
@@ -397,8 +397,8 @@ async def test_handle_long_correction_phrase_is_in_provenance(pipeline: _Pipelin
     lines = source.read_text(encoding="utf-8").splitlines()
     event = json.loads(lines[16])
     assert event["event"] == "turn.start" and event["run_id"] == "run-2"
-    phrase = "не так: надо было сначала посмотреть kernel-level профиль"
-    event["user_message"] = "Контекст задачи и предыстория. " * 24 + phrase + ", а не summary."
+    phrase = "不对：首先应该看 kernel-level 的性能剖析"
+    event["user_message"] = "任务背景和前情提要。" * 64 + phrase + "，而不是 summary。"
     assert event["user_message"].index(phrase) > 600
     lines[16] = json.dumps(event, ensure_ascii=False)
     source.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1055,7 +1055,7 @@ async def test_generate_skill_md_reports_middle_omissions(legacy_handler, monkey
     monkeypatch.setattr(DirectSkillGenerationHandler, "_build_skill_library_snapshot", fake_snapshot)
 
     result = await instance._generate_skill_md(
-        [HumanMessage(content="привет")], "Library:\n{skill_library}", THREAD_ID
+        [HumanMessage(content="你好")], "Library:\n{skill_library}", THREAD_ID
     )
 
     assert result == "Nothing to save."
