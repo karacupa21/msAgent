@@ -1,6 +1,6 @@
 # Experience Graph — Architecture
 
-Status: P0–P2.0 + **P2.1** (`evidence_mode` on the evolver hook), schema version 3.
+Status: P0–P2.1 + **P2.1b** (Insight.text via CountingLlm), schema version 3.
 Branch: `feature/experience-graph`.
 
 ## 1. Purpose
@@ -124,12 +124,19 @@ Skill Evolver unless someone opts in.
 Checked live on CLI `build`, `remember_thread`, the evolver hook, and the
 appendix. Inspection `show`/`export` of an existing shard still works.
 
+P2.1b: after a thread writes at least one proposal, `pipeline` asks
+`fill_overlay_insights` to set `Insight.text` with the same
+`CountingLlm` (limit still `max_llm_calls_per_thread`). Overlay rebuild
+stays deterministic. Empty overlay / exhausted budget / kill switch /
+`insight.fill_llm: false` → structural Insight only. Daemon is a third
+`run_thread` caller; it inherits the hook. FEATURES_VERSION is 5
+(evolver-owned).
+
 ## 8. Later
 
-Insight LLM persist after classify (`CountingLlm`, P2.1b), BM25 text
-similar via `skill_evolver.retrieval.tokenize` (P2.3), live `/skill-mine`
-A/B (P2.2), argument-aware `mine_cross_session`, outcome `recovered`,
-`finish_turn` enqueue, dense+RRF, `/exgraph` slash command.
+BM25 text similar via `skill_evolver.retrieval.tokenize` (P2.3), live
+`/skill-mine` A/B (P2.2), argument-aware `mine_cross_session`, outcome
+`recovered`, `finish_turn` enqueue, dense+RRF, `/exgraph` slash command.
 
 ## 9. CLI
 

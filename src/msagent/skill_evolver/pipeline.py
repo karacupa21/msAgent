@@ -1186,6 +1186,31 @@ class _ThreadRun:
             muted(sink, f"Verification: {outcome.verification['level']}; {outcome.verification['note']}")
             muted(sink, "Proposal: saved, inactive, DEMO" if rules.demo else "Proposal: saved, inactive")
             result.stages.append(StageOutcome(f"plan {label}", "written", str(outcome.skill_path)))
+        await self._maybe_fill_insights()
+
+    async def _maybe_fill_insights(self) -> None:
+        """P2.1b: fill empty overlay Insight.text with the thread CountingLlm."""
+        if not self.result.proposals or self.llm is None or self.llm.exhausted:
+            return
+        try:
+            from msagent.exgraph.config import is_exgraph_enabled, load_exgraph_config
+            from msagent.exgraph.insight import fill_overlay_insights
+            from msagent.exgraph.sources import resolve_graph_dir
+            from msagent.exgraph.workspace import workspace_dir
+
+            if not is_exgraph_enabled():
+                return
+            if not load_exgraph_config().insight.fill_llm:
+                return
+            root = resolve_graph_dir(
+                working_dir=self.run.working_dir,
+                state_dir=self.run.state_dir,
+            )
+            filled = await fill_overlay_insights(self.llm, workspace_dir(root))
+            if filled:
+                self.result.stages.append(StageOutcome("insight", "filled", str(filled)))
+        except Exception:
+            logger.debug("exgraph insight fill skipped", exc_info=True)
 
 
 def build_report(run: RunContext, thread: ThreadInput, result: ThreadResult) -> dict[str, Any]:

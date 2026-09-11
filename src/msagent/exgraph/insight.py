@@ -6,13 +6,32 @@
 # MindStudio is licensed under Mulan PSL v2.
 # -------------------------------------------------------------------------
 
-"""Insight nodes: accepted SkillDoc + high-support Recipe. No generated prose."""
+"""Insight nodes: accepted SkillDoc + high-support Recipe.
+
+Structural nodes are deterministic. Optional ``text`` is filled later by
+the same CountingLlm the evolver already owns — never inside rebuild_overlay.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import Any, Iterable
 
 from msagent.exgraph.schema import Edge, ExperienceGraph, Node, edge_id, insight_id
+
+logger = logging.getLogger(__name__)
+
+INSIGHT_PROMPT = (
+    "Write one or two short sentences: the reusable lesson of this agent experience.\n"
+    "Do not cite event numbers, Evidence lines, or [evN] ids. No markdown heading.\n"
+    "Recipe tools: {ngram}\n"
+    "Accepted skills: {skills}\n"
+    "Threads: {threads}\n"
+    "Support: {support}\n"
+)
+INSIGHT_TEXT_CAP = 400
 
 
 def accepted_skills(graphs: Iterable[ExperienceGraph]) -> list[Node]:
@@ -91,3 +110,61 @@ def insight_nodes(
                 )
             )
     return nodes, edges
+
+
+def insight_prompt(attrs: dict[str, Any]) -> str:
+    ngram = ">".join(str(part) for part in (attrs.get("ngram") or []))
+    skills = ", ".join(str(name) for name in (attrs.get("skills") or []))
+    threads = ", ".join(str(tid) for tid in (attrs.get("thread_ids") or []))
+    return INSIGHT_PROMPT.format(
+        ngram=ngram or attrs.get("recipe") or attrs.get("id") or "",
+        skills=skills or "(none)",
+        threads=threads or "(none)",
+        support=attrs.get("support") or 0,
+    )
+
+
+def _clean_insight_text(raw: str) -> str:
+    text = " ".join(str(raw).split())
+    for marker in ("Evidence:", "[ev"):
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+    return text[:INSIGHT_TEXT_CAP]
+
+
+async def compose_insight_text(llm: Any, attrs: dict[str, Any]) -> str:
+    """One CountingLlm ainvoke. Failures propagate to the caller."""
+    from msagent.skill_evolver.classify import reply_text
+
+    raw = reply_text(await llm.ainvoke(insight_prompt(attrs)))
+    return _clean_insight_text(raw)
+
+
+async def fill_overlay_insights(llm: Any, overlay_dir: Path, *, limit: int = 2) -> int:
+    """Write ``text`` onto Insight rows that lack it. Returns how many were filled."""
+    path = overlay_dir / "nodes.jsonl"
+    if not path.is_file() or limit < 1:
+        return 0
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    filled = 0
+    for row in rows:
+        if filled >= limit:
+            break
+        if row.get("type") != "Insight" or str(row.get("text") or "").strip():
+            continue
+        try:
+            row["text"] = await compose_insight_text(llm, row)
+        except Exception:
+            logger.debug("insight text skipped for %s", row.get("id"), exc_info=True)
+            continue
+        if row["text"]:
+            filled += 1
+    if filled:
+        path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    return filled

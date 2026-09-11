@@ -144,8 +144,12 @@ def render_thread_context(
         for node in insights:
             ngram = ">".join(str(part) for part in (node.get("ngram") or []))
             skills = ",".join(str(name) for name in (node.get("skills") or [])[:3])
+            extra = ""
+            text = str(node.get("text") or "").strip()
+            if text:
+                extra = f" text={_clip(text, 160)}"
             lines.append(
-                f"- {ngram or node.get('id')} support={node.get('support')} skills={skills}"
+                f"- {ngram or node.get('id')} support={node.get('support')} skills={skills}{extra}"
             )
     hits = [edge for edge in recipe_edges if edge.get("src") in case_ids and edge.get("type") == "INSTANTIATES"]
     if hits:

@@ -65,6 +65,10 @@ class SimilarConfig(BaseModel):
 
 class InsightConfig(BaseModel):
     min_support: int = Field(default=2, description="Minimum recipe support for an Insight")
+    fill_llm: bool = Field(
+        default=True,
+        description="After a written proposal, fill empty Insight.text via CountingLlm",
+    )
 
 
 class ExgraphConfig(BaseModel):

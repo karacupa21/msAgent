@@ -17,3 +17,4 @@ similar:
   min_tokens: 0.25
 insight:
   min_support: 2
+  fill_llm: true                  # CountingLlm after a written proposal; fail-open if budget/overlay empty
