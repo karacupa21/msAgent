@@ -3,7 +3,8 @@
 # Force off: MSAGENT_EXGRAPH_DISABLED=1 (wins over everything)
 # evidence_mode (when on): episodes | hybrid | graph
 #   override: MSAGENT_EXGRAPH_EVIDENCE_MODE
-version: "1.0"
+# version token is required by tests/ut/configs/test_config_versions.py
+version: "__APP_VERSION__"
 enabled: false
 evidence_mode: hybrid
 outcome:

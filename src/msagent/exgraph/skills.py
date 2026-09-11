@@ -12,7 +12,7 @@
 #
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
-# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
@@ -23,7 +23,7 @@ P0.5 looks at Skill Evolver artifacts by path only (no import of
 
 - ``<working_dir>/skills/.proposals/<thread>/`` (current writer root)
 - ``<output_dir>/.proposals/<thread>/`` when ``config.skill.evolver.yml``
-  sets ``output_dir`` (YAML read, fail-open)
+  sets ``generation.output_dir`` (v2) or flat ``output_dir`` (v1)
 - ``<working_dir>/.proposals/<thread>/`` (legacy P0 path, still accepted)
 - accepted library skills under ``skills/**/SKILL.md`` whose
   ``provenance.json`` or footer lists this thread
@@ -84,6 +84,14 @@ def _cites_thread(path: Path, thread_id: str) -> bool:
     return any(match.group(1) == thread_id for match in _FOOTER_THREAD.finditer(text))
 
 
+def _raw_output_dir(payload: dict[str, Any]) -> object:
+    """v2 ``generation.output_dir``, else flat v1 ``output_dir``."""
+    generation = payload.get("generation")
+    if isinstance(generation, dict) and "output_dir" in generation:
+        return generation.get("output_dir")
+    return payload.get("output_dir")
+
+
 def _evolver_output_dir(working_dir: Path) -> Path | None:
     """Read Skill Evolver output_dir from YAML only. Missing config is normal."""
     candidates: list[Path] = []
@@ -105,10 +113,15 @@ def _evolver_output_dir(working_dir: Path) -> Path | None:
             continue
         if not isinstance(payload, dict):
             continue
-        raw = payload.get("output_dir")
-        if not raw:
+        raw = _raw_output_dir(payload)
+        if raw is None or raw is False:
             return None
-        output = Path(str(raw)).expanduser()
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            return None
+        text = str(raw).strip()
+        if not text or text.lower() == "none":
+            return None
+        output = Path(text).expanduser()
         if not output.is_absolute():
             output = working_dir / output
         return output
