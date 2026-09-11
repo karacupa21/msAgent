@@ -6,10 +6,11 @@
 # MindStudio is licensed under Mulan PSL v2.
 # -------------------------------------------------------------------------
 
-"""P2.2 classify A/B is deterministic and invents no evidence seqs."""
+"""P2.2/P2.4 classify A/B."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ def _exgraph_opt_in(monkeypatch):
     reset_config_cache()
 
 
-from msagent.exgraph.ab import compare_trajectory, render_markdown
+from msagent.exgraph.ab import compare_decision_reports, compare_trajectory, render_markdown
 from msagent.trajectory_recorder.reader import load_trajectory
 
 REPO = Path(__file__).resolve().parents[3]
@@ -64,3 +65,41 @@ def test_ab_graph_puts_relations_first(tmp_path: Path) -> None:
     snap = report.modes[0]
     assert snap.graph_first is True
     assert snap.invented_evidence is False
+
+
+def test_kill_switch_hides_hybrid_appendix(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(ENV_DISABLED, "1")
+    monkeypatch.setenv(ENV_ENABLED, "1")
+    reset_config_cache()
+    traj = load_trajectory(SIGNALS)
+    work = tmp_path / "proj"
+    work.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    report = compare_trajectory(
+        traj,
+        working_dir=work,
+        state_dir=state,
+        modes=("hybrid",),
+        force_enable=False,
+    )
+    snap = report.modes[0]
+    assert snap.has_graph is False
+    assert "Experience graph" not in snap.text
+
+
+def test_compare_decision_reports(tmp_path: Path) -> None:
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text(
+        json.dumps({"thread_id": "t1", "classifier": {"verdict": "create"}, "proposals": ["x"]}),
+        encoding="utf-8",
+    )
+    b.write_text(
+        json.dumps({"thread_id": "t1", "classifier": {"verdict": "nothing"}, "proposals": []}),
+        encoding="utf-8",
+    )
+    diff = compare_decision_reports(a, b)
+    assert diff["same_thread"] is True
+    assert diff["same_verdict"] is False
+    assert diff["same_proposal_count"] is False

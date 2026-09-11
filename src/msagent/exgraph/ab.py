@@ -6,16 +6,11 @@
 # MindStudio is licensed under Mulan PSL v2.
 # -------------------------------------------------------------------------
 
-"""P2.2 classify-input A/B. No new graph types, no LLM.
-
-Runs the same trajectory through attach_stored_graph under
-``episodes`` / ``hybrid`` / ``graph`` and records what classify would see.
-Full /skill-mine A/B (verdict + proposal) is the same env flip plus the
-evolver command; this module measures the input half deterministically.
-"""
+"""P2.2/P2.4 classify-input A/B. No new graph types, no LLM."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,12 +65,22 @@ class AbReport:
         }
 
 
-def _facts(text: str) -> dict[str, bool]:
-    extra_ok = "Experience graph" in text
-    return {
-        "has_graph": extra_ok,
-        "graph_first": text.lstrip().startswith("## Experience graph"),
-    }
+def _graph_portion(mode: str, bundle: str, text: str) -> str:
+    if mode == "episodes":
+        return ""
+    if mode == "hybrid":
+        if text.startswith(bundle):
+            return text[len(bundle) :]
+        return text if "Experience graph" in text else ""
+    if "## Episode bundle" in text:
+        return text.split("## Episode bundle", 1)[0]
+    return text if text.lstrip().startswith("## Experience graph") else ""
+
+
+def _invented_evidence(portion: str) -> bool:
+    if not portion:
+        return False
+    return "Evidence:" in portion or "[ev" in portion
 
 
 def compare_trajectory(
@@ -84,6 +89,7 @@ def compare_trajectory(
     working_dir: Path,
     state_dir: Path,
     modes: tuple[str, ...] = ("episodes", "hybrid"),
+    force_enable: bool = True,
 ) -> AbReport:
     """Build the evolver bundle once, then attach under each mode."""
     from msagent.skill_evolver.bundle import build_evidence_bundle
@@ -99,42 +105,75 @@ def compare_trajectory(
         episode_kinds=sorted({ep.kind for ep in episodes}),
         evidence_score=float(evidence_score(episodes)),
     )
-    os.environ[ENV_ENABLED] = "1"
-    os.environ.pop(ENV_DISABLED, None)
-    for mode in modes:
-        if mode not in MODES:
-            continue
-        os.environ[ENV_EVIDENCE_MODE] = mode
-        reset_config_cache()
-        text = attach_stored_graph(
-            bundle,
-            trajectory,
-            working_dir=working_dir,
-            state_dir=state_dir,
-        )
-        extra = text[len(bundle) :] if text.startswith(bundle) else text
-        if mode == "graph" and "## Episode bundle" in text:
-            extra = text.split("## Episode bundle", 1)[0]
-        facts = _facts(text)
-        invented = "Evidence:" in extra or "[ev" in extra and mode != "episodes"
-        if mode == "episodes":
-            invented = False
-        shards = list(state_dir.rglob("nodes.jsonl")) if mode == "episodes" else list(state_dir.rglob("nodes.jsonl"))
-        report.modes.append(
-            ModeSnapshot(
-                mode=mode,
-                text=text,
-                chars=len(text),
-                appendix_chars=max(0, len(text) - len(bundle)) if mode != "graph" else max(0, len(extra)),
-                has_graph=facts["has_graph"] and mode != "episodes",
-                graph_first=facts["graph_first"] and mode == "graph",
-                invented_evidence=bool(invented) and mode != "episodes",
-                shards=len(list(state_dir.rglob("nodes.jsonl"))),
+    saved_enabled = os.environ.get(ENV_ENABLED)
+    saved_disabled = os.environ.get(ENV_DISABLED)
+    saved_mode = os.environ.get(ENV_EVIDENCE_MODE)
+    if force_enable:
+        os.environ[ENV_ENABLED] = "1"
+        os.environ.pop(ENV_DISABLED, None)
+    try:
+        for mode in modes:
+            if mode not in MODES:
+                continue
+            os.environ[ENV_EVIDENCE_MODE] = mode
+            reset_config_cache()
+            text = attach_stored_graph(
+                bundle,
+                trajectory,
+                working_dir=working_dir,
+                state_dir=state_dir,
             )
-        )
-    os.environ.pop(ENV_EVIDENCE_MODE, None)
-    reset_config_cache()
+            portion = _graph_portion(mode, bundle, text)
+            report.modes.append(
+                ModeSnapshot(
+                    mode=mode,
+                    text=text,
+                    chars=len(text),
+                    appendix_chars=len(portion),
+                    has_graph="Experience graph" in text and mode != "episodes",
+                    graph_first=text.lstrip().startswith("## Experience graph") and mode == "graph",
+                    invented_evidence=_invented_evidence(portion),
+                    shards=len(list(state_dir.rglob("nodes.jsonl"))),
+                )
+            )
+    finally:
+        for key, value in (
+            (ENV_ENABLED, saved_enabled),
+            (ENV_DISABLED, saved_disabled),
+            (ENV_EVIDENCE_MODE, saved_mode),
+        ):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        reset_config_cache()
     return report
+
+
+def compare_decision_reports(path_a: Path, path_b: Path) -> dict[str, Any]:
+    """Diff two Skill Evolver decision JSON files from /skill-mine."""
+
+    def pick(path: Path) -> dict[str, Any]:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        clf = data.get("classifier") or {}
+        proposals = list(data.get("proposals") or [])
+        return {
+            "path": str(path),
+            "thread_id": data.get("thread_id"),
+            "verdict": clf.get("verdict"),
+            "candidates": clf.get("candidates"),
+            "proposals": proposals,
+            "proposal_count": len(proposals),
+        }
+
+    left, right = pick(path_a), pick(path_b)
+    return {
+        "a": left,
+        "b": right,
+        "same_thread": left["thread_id"] == right["thread_id"],
+        "same_verdict": left["verdict"] == right["verdict"],
+        "same_proposal_count": left["proposal_count"] == right["proposal_count"],
+    }
 
 
 def render_markdown(report: AbReport) -> str:

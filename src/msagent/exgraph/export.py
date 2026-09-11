@@ -226,8 +226,18 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_ab(args: argparse.Namespace) -> int:
     """Classify-input A/B for one trajectory. No LLM."""
-    from msagent.exgraph.ab import compare_trajectory, render_markdown
+    from msagent.exgraph.ab import compare_decision_reports, compare_trajectory, render_markdown
     from msagent.exgraph.sources import load_source_trajectory
+
+    if args.report_a and args.report_b:
+        diff = compare_decision_reports(Path(args.report_a), Path(args.report_b))
+        text = json.dumps(diff, ensure_ascii=False, indent=2) + "\n"
+        if args.output and args.output != "-":
+            Path(args.output).write_text(text, encoding="utf-8")
+            print(f"Written to {args.output}")
+        else:
+            print(text, end="")
+        return 0
 
     path = Path(args.path) if args.path else None
     work = Path(args.working_dir) if args.working_dir else Path.cwd()
@@ -245,6 +255,10 @@ def cmd_ab(args: argparse.Namespace) -> int:
     if args.output and args.output != "-":
         dest = Path(args.output)
         dest.write_text(text, encoding="utf-8")
+        dest.with_suffix(".json").write_text(
+            json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         print(f"Written to {dest}")
     else:
         print(text)
@@ -257,11 +271,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Build and inspect experience graphs from recorded trajectories",
     )
     parser.add_argument("command", choices=["build", "show", "export", "viz", "ab"])
-    parser.add_argument(
-        "--modes",
-        default="episodes,hybrid",
-        help="Comma list for ab: episodes,hybrid,graph",
-    )
+    parser.add_argument("--modes", default="episodes,hybrid", help="ab: episodes,hybrid,graph")
+    parser.add_argument("--report-a", default=None, help="ab: first /skill-mine decision JSON")
+    parser.add_argument("--report-b", default=None, help="ab: second /skill-mine decision JSON")
     parser.add_argument("-w", "--working-dir", default=None)
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("-t", "--thread", default=None, help="Thread id or unique prefix")
@@ -273,10 +285,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-f", "--format", choices=["json"], default="json")
     args = parser.parse_args(argv)
 
+    if args.command == "ab":
+        if not (args.report_a and args.report_b) and not args.thread and not args.path:
+            parser.error("ab needs --path/--thread or --report-a plus --report-b")
+        return cmd_ab(args)
     if args.command not in {"show", "viz"} and not args.thread and not args.path and not getattr(args, "all", False):
         parser.error("--thread, --path or --all is required")
-    if args.command == "ab":
-        return cmd_ab(args)
 
     if args.command == "build":
         if args.all:
