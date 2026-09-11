@@ -23,7 +23,7 @@ does, under a narrow allowlist (``python3 -c <code> <operands>``: every name
 token of the code is one of ALLOWED_NAMES, ``csv.DictReader`` and
 ``sys.argv`` are the only attribute accesses, strings carry no backslash and
 operands are plain relative names) in an isolated interpreter with an empty
-PATH, so a fixture or a rendered SKILL.md can never smuggle a shell command
+PATH, so a fixture or a generated SKILL.md can never smuggle a shell command
 into the test run.
 """
 
@@ -58,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "trajectories" / "skill_evolver_demo_success.jsonl"
 THREAD_ID = "thread-demo-synthetic"
 SALES_CSV = "id,amount\n1,10\n2,20\n3,30\n"
-# Placeholders of the rendered example and the values the fixture recorded for them.
+# Placeholders of the generated example and the values the fixture recorded for them.
 PARAMETERS = {"<csv-path>": "input/sales.csv", "<column>": "amount", "<expected-total>": "60"}
 
 # The allowlist: python3 -c <code> <operands>. The code is tokenized; every
@@ -98,7 +98,7 @@ _FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
 OPERAND_RE = re.compile(r"[A-Za-z0-9_./-]+")
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -271,7 +271,7 @@ def test_fixture_command_reproduces_recorded_total_in_sandbox(sandbox: Path) -> 
         assert _run_allowlisted(command, sandbox) == output.strip()
 
 
-# --------------------------------------------------------- the rendered skill
+# -------------------------------------------------------- the generated skill
 
 
 class _Sink:
@@ -308,7 +308,7 @@ class _NullStatus:
 
 
 def _prompts() -> StagePrompts:
-    texts = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+    texts = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
     return StagePrompts(
         **{stage: PromptText(stage, text, f"fake/{stage}", prompt_sha256(text), 2) for stage, text in texts.items()}
     )
@@ -376,7 +376,7 @@ def _first_python_example(skill_md: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_rendered_demo_skill_example_reproduces_total(
+async def test_generated_demo_skill_example_reproduces_total(
     tmp_path: Path, sandbox: Path, fake_llm_cls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(ENV_DISABLED, "1")

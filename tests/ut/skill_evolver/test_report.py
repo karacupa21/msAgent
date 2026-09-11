@@ -113,7 +113,7 @@ def test_report_written_with_zero_proposals_name_content_and_mode(tmp_path: Path
         assert (path.stat().st_mode & 0o777) == 0o600
 
     document = json.loads(path.read_text(encoding="utf-8"))
-    assert document["report_version"] == REPORT_VERSION == 1
+    assert document["report_version"] == REPORT_VERSION == 2
     assert document["evidence_text_file"] is None
     assert document["gate"]["passes"] is False
     assert document["plans"]["proposals"] == 0
@@ -151,7 +151,7 @@ def test_report_writes_rejected_drafts_next_to_it(tmp_path: Path) -> None:
             "code": "quality_review_failed",
             "content": "---\nname: x\n---\nbody\n",
         },
-        {"plan": "update alpha (2 rules)", "code": "render_invalid", "content": "not even frontmatter"},
+        {"plan": "update alpha (2 rules)", "code": "generation_invalid", "content": "not even frontmatter"},
     ]
 
     path = write_report(directory, thread_id="t3", payload=PAYLOAD, rejected_drafts=drafts)

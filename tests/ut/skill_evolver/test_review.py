@@ -16,7 +16,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""Tests for the semantic review stage and the per-plan render_and_review chain (scripted LLM)."""
+"""Tests for the semantic review stage and the per-plan generate_and_review chain (scripted LLM)."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ import pytest
 
 from msagent.skill_evolver.bundle import ShownFragment
 from msagent.skill_evolver.classify import EMPTY_REPLY, Candidate
-from msagent.skill_evolver.render import INSUFFICIENT_CONTEXT_BUDGET, NO_EXISTING_SKILL, format_existing_skill
+from msagent.skill_evolver.generate import INSUFFICIENT_CONTEXT_BUDGET, NO_EXISTING_SKILL, format_existing_skill
 from msagent.skill_evolver.review import (
     CANDIDATES_PLACEHOLDER,
     EVIDENCE_PLACEHOLDER,
     EXISTING_SKILL_PLACEHOLDER,
+    GENERATION_INVALID,
     ISSUE_CODES,
     QUALITY_REVIEW_FAILED,
-    RENDER_INVALID,
     REVIEW_POLICY_PLACEHOLDER,
     SKILL_MD_PLACEHOLDER,
     VERIFICATION_EVIDENCE_SUPPORTED,
@@ -46,8 +46,8 @@ from msagent.skill_evolver.review import (
     ReviewResult,
     format_review_candidates,
     format_review_evidence,
+    generate_and_review,
     parse_review_reply,
-    render_and_review,
     review_skill_md,
 )
 from msagent.trajectory_recorder.model import EvidenceRef
@@ -56,12 +56,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PROMPT_PATH = REPO_ROOT / "resources" / "configs" / "default" / "skill-evolver" / "prompts" / "review" / "prompt_v2.md"
 LOGGER = "msagent.skill_evolver.review"
 
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
 )
-RENDER_POLICY = "Selection policy: test render."
+GENERATION_POLICY = "Selection policy: test generation."
 REVIEW_POLICY = "Review policy: test review."
 
 VALID = "\n".join(
@@ -153,14 +153,14 @@ async def _review(llm: Any, skill_md: str = VALID, existing: str | None = None, 
 async def _chain(llm: Any, **overrides: Any):
     kwargs: dict[str, Any] = {
         "llm": llm,
-        "render_template": RENDER_TEMPLATE,
+        "generation_template": GENERATION_TEMPLATE,
         "review_template": REVIEW_TEMPLATE,
-        "render_policy": RENDER_POLICY,
+        "generation_policy": GENERATION_POLICY,
         "review_policy": REVIEW_POLICY,
         "evidence": SHOWN,
     }
     kwargs.update(overrides)
-    return await render_and_review([_candidate()], **kwargs)
+    return await generate_and_review([_candidate()], **kwargs)
 
 
 # ------------------------------------------------------------------- parsing
@@ -399,11 +399,11 @@ async def test_review_guards_raise_before_any_call(fake_llm_cls) -> None:
     assert llm.payloads == []
 
 
-# ---------------------------------------------------------- render_and_review
+# -------------------------------------------------------- generate_and_review
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_pass_is_two_calls(fake_llm_cls) -> None:
+async def test_generate_and_review_pass_is_two_calls(fake_llm_cls) -> None:
     llm = fake_llm_cls(VALID, REVIEW_PASS)
 
     result = await _chain(llm)
@@ -414,7 +414,7 @@ async def test_render_and_review_pass_is_two_calls(fake_llm_cls) -> None:
     assert result.validation is not None and result.validation.ok
     assert result.review is not None and result.review.verdict == "pass"
     assert result.corrected is False and result.initial_issues == []
-    assert result.render_evidence == {"c1": ["ev1", "ev2"]} and result.render_evidence_omitted == {"c1": []}
+    assert result.generation_evidence == {"c1": ["ev1", "ev2"]} and result.generation_evidence_omitted == {"c1": []}
     assert result.review_record() == {
         "verdict": "pass",
         "issues": [],
@@ -423,16 +423,16 @@ async def test_render_and_review_pass_is_two_calls(fake_llm_cls) -> None:
         "corrected": False,
         "initial_issues": [],
     }
-    render_instruction, review_instruction = llm.payloads[0][0][1], llm.payloads[1][0][1]
-    assert RENDER_POLICY in render_instruction and REVIEW_POLICY in review_instruction
-    # The reviewer sees exactly what the renderer was quoted, with ids.
+    generation_instruction, review_instruction = llm.payloads[0][0][1], llm.payloads[1][0][1]
+    assert GENERATION_POLICY in generation_instruction and REVIEW_POLICY in review_instruction
+    # The reviewer sees exactly what the generation call was quoted, with ids.
     assert "- [ev1] (required) " + SHOWN["ev1"].text in review_instruction
     assert "- [ev2] (context) " + SHOWN["ev2"].text in review_instruction
     assert "[ev3]" not in review_instruction and "[ev4]" not in review_instruction
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_unknown_flag_blocked_then_corrected(fake_llm_cls) -> None:
+async def test_generate_and_review_unknown_flag_blocked_then_corrected(fake_llm_cls) -> None:
     llm = fake_llm_cls(SKILL_WITH_FLAG, REVIEW_FAIL_FLAG, VALID, REVIEW_PASS)
 
     result = await _chain(llm)
@@ -442,7 +442,7 @@ async def test_render_and_review_unknown_flag_blocked_then_corrected(fake_llm_cl
     assert result.initial_issues == ["unsupported_addition: the evidence shows no --jobs flag"]
     assert result.content == VALID.strip()
     assert result.review is not None and result.review.verdict == "pass"
-    # The corrective render continues the render transcript with the reviewer's bullet.
+    # The corrective revision continues the generation transcript with the reviewer's bullet.
     revise = llm.payloads[2]
     assert revise[0] == llm.payloads[0][0]
     assert revise[1] == ("ai", SKILL_WITH_FLAG.strip())
@@ -456,7 +456,7 @@ async def test_render_and_review_unknown_flag_blocked_then_corrected(fake_llm_cl
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_lost_constraint_fails_after_one_correction(fake_llm_cls) -> None:
+async def test_generate_and_review_lost_constraint_fails_after_one_correction(fake_llm_cls) -> None:
     lost = _fail(_issue("lost_condition", "the missing-dependency error condition is gone", evidence_refs=["ev1"]))
     still = _fail(_issue("lost_condition", "the condition is still missing", evidence_refs=["ev1"]))
     llm = fake_llm_cls(VALID, lost, SKILL_WITH_FLAG, still)
@@ -476,7 +476,7 @@ async def test_render_and_review_lost_constraint_fails_after_one_correction(fake
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_invalid_corrective_render_is_quality_review_failed(fake_llm_cls) -> None:
+async def test_generate_and_review_invalid_corrective_revision_is_quality_review_failed(fake_llm_cls) -> None:
     llm = fake_llm_cls(SKILL_WITH_FLAG, REVIEW_FAIL_FLAG, INVALID, REVIEW_PASS)
 
     result = await _chain(llm)
@@ -491,7 +491,7 @@ async def test_render_and_review_invalid_corrective_render_is_quality_review_fai
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_reviewer_invalid_twice_is_quality_review_failed(fake_llm_cls) -> None:
+async def test_generate_and_review_reviewer_invalid_twice_is_quality_review_failed(fake_llm_cls) -> None:
     llm = fake_llm_cls(VALID, "nope", "still nope")
 
     result = await _chain(llm)
@@ -502,11 +502,11 @@ async def test_render_and_review_reviewer_invalid_twice_is_quality_review_failed
         + result.errors[0].split("invalid JSON: ", 1)[1]
     ]
     assert result.content is None and result.review is None
-    assert result.render_evidence == {"c1": ["ev1", "ev2"]}
+    assert result.generation_evidence == {"c1": ["ev1", "ev2"]}
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_second_reviewer_reply_invalid_is_quality_review_failed(fake_llm_cls) -> None:
+async def test_generate_and_review_second_reviewer_reply_invalid_is_quality_review_failed(fake_llm_cls) -> None:
     llm = fake_llm_cls(SKILL_WITH_FLAG, REVIEW_FAIL_FLAG, VALID, "garbage")
 
     result = await _chain(llm)
@@ -519,52 +519,54 @@ async def test_render_and_review_second_reviewer_reply_invalid_is_quality_review
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_render_invalid_makes_no_review_call(fake_llm_cls) -> None:
+async def test_generate_and_review_generation_invalid_makes_no_review_call(fake_llm_cls) -> None:
     llm = fake_llm_cls(INVALID, "no frontmatter at all")
 
     result = await _chain(llm)
 
-    assert result.code == RENDER_INVALID and result.calls == 2 and len(llm.payloads) == 2
+    assert result.code == GENERATION_INVALID and result.calls == 2 and len(llm.payloads) == 2
     assert any("no YAML frontmatter" in error for error in result.errors)
     assert result.content is None and result.review is None
     assert result.validation is not None and not result.validation.ok
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_budget_rejection_makes_no_call(fake_llm_cls) -> None:
+async def test_generate_and_review_budget_rejection_makes_no_call(fake_llm_cls) -> None:
     llm = fake_llm_cls(VALID, REVIEW_PASS)
 
     result = await _chain(llm, evidence_budget_chars=1)
 
     assert result.code == INSUFFICIENT_CONTEXT_BUDGET and result.calls == 0
     assert llm.payloads == []
-    assert result.errors == ["candidate c1: required evidence ['ev1'] does not fit the render budget"]
+    assert result.errors == ["candidate c1: required evidence ['ev1'] does not fit the evidence budget"]
     assert result.content is None and result.review is None
-    assert result.render_evidence == {} and result.render_evidence_omitted == {}
+    assert result.generation_evidence == {} and result.generation_evidence_omitted == {}
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_empty_selection_is_budget_rejection_before_llm(fake_llm_cls) -> None:
+async def test_generate_and_review_empty_selection_is_budget_rejection_before_llm(fake_llm_cls) -> None:
     llm = fake_llm_cls(VALID, REVIEW_PASS)
     only_optional = [_candidate(evidence_refs=["ev2", "ev4"])]
 
-    result = await render_and_review(
+    result = await generate_and_review(
         only_optional,
         llm=llm,
-        render_template=RENDER_TEMPLATE,
+        generation_template=GENERATION_TEMPLATE,
         review_template=REVIEW_TEMPLATE,
-        render_policy=RENDER_POLICY,
+        generation_policy=GENERATION_POLICY,
         review_policy=REVIEW_POLICY,
         evidence=SHOWN,
         evidence_budget_chars=1,
     )
 
     assert result.code == INSUFFICIENT_CONTEXT_BUDGET and result.calls == 0 and llm.payloads == []
-    assert result.errors == ["no evidence fragment fits the render budget; nothing to render or review against"]
+    assert result.errors == [
+        "no evidence fragment fits the evidence budget; nothing to generate from or review against"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_max_six_calls(fake_llm_cls) -> None:
+async def test_generate_and_review_max_six_calls(fake_llm_cls) -> None:
     fixed = VALID.replace("A green run.", "A green run of the test suite.")
     llm = fake_llm_cls(INVALID, SKILL_WITH_FLAG, "not json", REVIEW_FAIL_FLAG, fixed, REVIEW_PASS)
 
@@ -575,12 +577,12 @@ async def test_render_and_review_max_six_calls(fake_llm_cls) -> None:
     assert result.content == fixed.strip()
     assert result.review is not None and result.review.calls == 1
     assert result.initial_issues == ["unsupported_addition: the evidence shows no --jobs flag"]
-    # render 2 (validator correction) + review 2 (parse retry) + revise 1 + review 1
+    # generate 2 (validator correction) + review 2 (parse retry) + revise 1 + review 1
     assert [len(payload) for payload in llm.payloads] == [1, 3, 1, 3, 5, 1]
 
 
 @pytest.mark.asyncio
-async def test_render_and_review_passes_update_and_prefix_arguments_through(fake_llm_cls) -> None:
+async def test_generate_and_review_passes_update_and_prefix_arguments_through(fake_llm_cls) -> None:
     existing = format_existing_skill("real", "---\nname: real\n---\nold body\n")
     llm = fake_llm_cls(VALID.replace("name: build-before-test", "name: real"), REVIEW_PASS)
 
@@ -619,5 +621,5 @@ def test_packaged_review_prompt_contract() -> None:
     assert "a claimed test or verification not present in the evidence" in text
     assert "does not mean the procedure was executed" in text
     assert "[ev<k>]" in text
-    for absent in ("{evidence_bundle}", "{skill_library}", "{selection_policy}", "{render_policy}"):
+    for absent in ("{evidence_bundle}", "{skill_library}", "{selection_policy}", "{generation_policy}"):
         assert absent not in text, absent

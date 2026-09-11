@@ -29,6 +29,11 @@ Usage (from the repository root, with the CLI's LLM credentials in the environme
     .venv/bin/python scripts/skill_evolver_smoke_demo.py [--dry-run] [--model ALIAS] [--work DIR]
 
 ``--dry-run`` exercises the same path without creating an LLM.
+
+The demo needs the workspace trajectory scope (the default). The fixture records
+``working_dir: /synthetic/demo`` (the ``is_synthetic`` marker), so under
+``output.scope: shared`` /skill-mine only sees the threads recorded in ``--work``
+and reports the demo thread as missing.
 """
 
 from __future__ import annotations

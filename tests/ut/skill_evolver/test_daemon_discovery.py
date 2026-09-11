@@ -35,6 +35,7 @@ from msagent.skill_evolver.daemon.discovery import (
     discover_projects,
     incompleteness,
     iter_scans,
+    iter_shared_scans,
     preflight,
     scan_project,
 )
@@ -235,3 +236,97 @@ def test_missing_trajectories_dir_yields_nothing(home: Path, tmp_path: Path) -> 
 )
 def test_incompleteness_reasons(fixture: str, expected: str | None) -> None:
     assert incompleteness(load_trajectory(FIXTURES / fixture)) == expected
+
+
+# ------------------------------------------------------------- shared store
+
+
+def _shared_place(
+    store: Path,
+    fixture: str,
+    name: str,
+    working_dir: Path | str | None,
+    *,
+    age: float = QUIET + 60,
+) -> Path:
+    """Copy a fixture into the shared store as recorded in ``working_dir`` (None: no origin)."""
+    lines: list[str] = []
+    for raw in (FIXTURES / fixture).read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        event = json.loads(raw)
+        if event.get("event") == "recorder.attach":
+            event.pop("working_dir", None)
+            if working_dir is not None:
+                event["working_dir"] = str(working_dir)
+        lines.append(json.dumps(event, ensure_ascii=False))
+    target = store / name
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    stamp = NOW - age
+    os.utime(target, (stamp, stamp))
+    return target
+
+
+@pytest.fixture
+def store(home: Path) -> Path:
+    directory = home / "state" / "trajectories"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def test_shared_scan_hands_each_file_to_its_origin_project(home: Path, store: Path, tmp_path: Path) -> None:
+    """One pass over the store; each thread becomes a candidate of one project only."""
+    first = _project(home, (tmp_path / "first").resolve(), "first-1")
+    second = _project(home, (tmp_path / "second").resolve(), "second-1")
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-a.jsonl", first.working_dir)
+    _shared_place(store, "recorder_limit.jsonl", "Quantizer_thread-b.jsonl", second.working_dir)
+
+    scans = list(iter_shared_scans(store, [first, second], _config(), now=NOW))
+
+    assert [scan.project.project_id for scan in scans] == ["first-1", "second-1"]
+    assert [c.path.name for c in scans[0].candidates] == ["Profiler_thread-a.jsonl"]
+    assert [c.path.name for c in scans[1].candidates] == ["Quantizer_thread-b.jsonl"]
+    assert all(c.project is second for c in scans[1].candidates)
+
+
+def test_shared_scan_leaves_unattributable_files_alone(home: Path, store: Path, tmp_path: Path) -> None:
+    """No origin, a relative one, or a project outside this tick: nobody's candidate."""
+    project = _project(home, (tmp_path / "work").resolve())
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-none.jsonl", None)
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-rel.jsonl", "work")
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-away.jsonl", tmp_path / "away")
+
+    scans = list(iter_shared_scans(store, [project], _config(), now=NOW))
+
+    assert [scan.project.project_id for scan in scans] == [project.project_id]
+    assert scans[0].candidates == []
+    assert scans[0].skipped == []
+
+
+def test_shared_scan_reports_skips_against_the_origin_project(home: Path, store: Path, tmp_path: Path) -> None:
+    project = _project(home, (tmp_path / "work").resolve())
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-live.jsonl", project.working_dir, age=10)
+    _shared_place(store, "missing_turn_end.jsonl", "Profiler_thread-ctrlc.jsonl", project.working_dir)
+
+    scans = list(iter_shared_scans(store, [project], _config(), now=NOW))
+
+    assert scans[0].candidates == []
+    assert sorted(reason for _, reason in scans[0].skipped) == ["last turn has no turn.end", "still active"]
+
+
+def test_an_empty_file_in_the_shared_store_defers_the_whole_tick(home: Path, store: Path, tmp_path: Path) -> None:
+    project = _project(home, (tmp_path / "work").resolve())
+    _shared_place(store, "skill_evolver_signals.jsonl", "Profiler_thread-done.jsonl", project.working_dir)
+    (store / "Profiler_thread-brandnew.jsonl").write_text("", encoding="utf-8")
+
+    assert list(iter_shared_scans(store, [project], _config(), now=NOW)) == []
+
+
+def test_a_missing_shared_store_still_yields_every_project(home: Path, tmp_path: Path) -> None:
+    """The runner stamps the inbox of every scanned project, even an empty one."""
+    first = _project(home, (tmp_path / "first").resolve(), "first-1")
+    second = _project(home, (tmp_path / "second").resolve(), "second-1")
+
+    scans = list(iter_shared_scans(home / "state" / "trajectories", [first, second], _config(), now=NOW))
+
+    assert [(scan.project.project_id, scan.candidates) for scan in scans] == [("first-1", []), ("second-1", [])]

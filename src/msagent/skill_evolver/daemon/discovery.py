@@ -29,6 +29,11 @@ therefore **inferred**:
 ``quiescent`` is file mtime, the same signal ``/skill-mine --since`` already trusts;
 ``complete`` is the reader's own ``Turn.status`` and ``ToolCall.status`` markers.
 
+In the shared store (``output.scope: shared`` in the recorder config) every project
+resolves the same directory. :func:`iter_shared_scans` then reads it once per tick and
+hands each file to the project whose working directory its ``recorder.attach`` names,
+so a thread is mined once, in the context of the workspace it was recorded in.
+
 Stdlib only (plus the recorder's langchain-free reader), so the whole selection stage
 runs in tests without an LLM.
 """
@@ -44,7 +49,13 @@ from msagent.core.logging import get_logger
 from msagent.core.paths import AppPaths
 from msagent.skill_evolver.daemon.config import SkillDaemonConfig
 from msagent.trajectory_recorder.export import resolve_trajectories_dir
-from msagent.trajectory_recorder.reader import TrajectoryReadError, iter_events, load_trajectory
+from msagent.trajectory_recorder.reader import (
+    TrajectoryReadError,
+    file_workspace,
+    iter_events,
+    load_trajectory,
+    workspace_key,
+)
 from msagent.trajectory_recorder.model import Trajectory
 
 logger = get_logger(__name__)
@@ -192,40 +203,90 @@ def scan_project(project: ProjectRef, config: SkillDaemonConfig, *, now: float) 
     if not directory.is_dir():
         return result
     preflight(directory)
-
-    quiet = config.schedule.quiet_period_seconds
-    agents = set(config.scope.agents)
     for path in sorted(directory.glob("*.jsonl")):
-        stat = path.stat()
-        if now - stat.st_mtime < quiet:
-            result.skipped.append((path, "still active"))
-            continue
-        try:
-            trajectory = load_trajectory(path)
-        except TrajectoryReadError as exc:
-            # Quiescent and still unreadable: a real defect, not a race. The caller
-            # records it against max_attempts so it stops being retried forever.
-            result.skipped.append((path, f"unreadable: {exc}"))
-            logger.error("skill-daemon: %s is quiescent but unreadable: %s", path, exc)
-            continue
-        if agents and trajectory.agent not in agents:
-            result.skipped.append((path, f"agent {trajectory.agent} out of scope"))
-            continue
-        incomplete = incompleteness(trajectory)
-        if incomplete is not None:
-            result.skipped.append((path, incomplete))
-            continue
-        result.candidates.append(
-            Candidate(
-                project=project,
-                path=path,
-                thread_id=trajectory.thread_id,
-                agent=trajectory.agent,
-                size_bytes=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
-            )
-        )
+        _examine(path, result, config, now=now)
     return result
+
+
+def _examine(
+    path: Path,
+    result: ScanResult,
+    config: SkillDaemonConfig,
+    *,
+    now: float,
+) -> None:
+    """Add a file of ``result.project`` as a candidate, or as a skip with a reason."""
+    stat = path.stat()
+    if now - stat.st_mtime < config.schedule.quiet_period_seconds:
+        result.skipped.append((path, "still active"))
+        return
+    try:
+        trajectory = load_trajectory(path)
+    except TrajectoryReadError as exc:
+        # Quiescent and still unreadable: a real defect, not a race. The caller
+        # records it against max_attempts so it stops being retried forever.
+        result.skipped.append((path, f"unreadable: {exc}"))
+        logger.error("skill-daemon: %s is quiescent but unreadable: %s", path, exc)
+        return
+    agents = set(config.scope.agents)
+    if agents and trajectory.agent not in agents:
+        result.skipped.append((path, f"agent {trajectory.agent} out of scope"))
+        return
+    incomplete = incompleteness(trajectory)
+    if incomplete is not None:
+        result.skipped.append((path, incomplete))
+        return
+    result.candidates.append(
+        Candidate(
+            project=result.project,
+            path=path,
+            thread_id=trajectory.thread_id,
+            agent=trajectory.agent,
+            size_bytes=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+        )
+    )
+
+
+def iter_shared_scans(
+    store_dir: Path,
+    projects: list[ProjectRef],
+    config: SkillDaemonConfig,
+    *,
+    now: float,
+) -> Iterator[ScanResult]:
+    """Scan the shared store once and hand each file to the project it was recorded in.
+
+    Every project resolves ``store_dir``, so per-project scans would parse each file
+    once per project and mine each thread once per project. A file belongs to the
+    project whose working directory its first event (``recorder.attach``) names; a
+    file whose origin is unknown, relative or not among ``projects`` (out of scope,
+    or not selected by ``--project``) is logged and left alone. Every project gets a
+    ``ScanResult``, empty or not, because the runner stamps its inbox from it; a store
+    that is not safe to enumerate yet defers the whole tick.
+    """
+    results = [ScanResult(project=project) for project in projects]
+    owners = {workspace_key(result.project.working_dir): result for result in results}
+    if store_dir.is_dir():
+        try:
+            preflight(store_dir)
+        except PoolNotReady as exc:
+            logger.warning(
+                "skill-daemon: deferring every project to the next tick: %s",
+                exc,
+            )
+            return
+        for path in sorted(store_dir.glob("*.jsonl")):
+            origin = file_workspace(path)
+            owner = owners.get(origin) if origin is not None else None
+            if owner is None:
+                reason = "unknown origin workspace"
+                if origin is not None:
+                    reason = f"origin {origin} is not in this tick"
+                logger.info("skill-daemon: skipping %s (%s)", path, reason)
+                continue
+            _examine(path, owner, config, now=now)
+    yield from results
 
 
 def incompleteness(trajectory: Trajectory) -> str | None:

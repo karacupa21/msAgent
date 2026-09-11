@@ -18,7 +18,7 @@
 
 """Proposal writer: SKILL.md drafts that no skill scanner can see.
 
-A rendered and validated skill is written to
+A generated and validated skill is written to
 ``<root>/.proposals/<thread>/<name>/SKILL.md`` next to a mandatory
 ``provenance.json``. :meth:`SkillFactory.load_skills` skips
 dot-directories, and the extra ``<thread>`` level keeps the files below the
@@ -29,20 +29,25 @@ the whole package (SKILL.md and provenance.json) is scanned with
 :class:`SecretsDetected` and nothing is created. Stdlib only.
 
 Provenance contract (``provenance_version`` PROVENANCE_VERSION) is scoped to
-the render plan a proposal came from and tells three things apart: the
+the generation plan a proposal came from and tells three things apart: the
 episodes the detectors extracted for the thread (with their bundle outcome:
 shown, trimmed, excluded; an evidence item's ``id`` is null when this
 proposal's candidates do not cite it), the fragments those candidates cite
 (``evidence_shown``, id -> file, line, seq, redacted text; a subset of what
-the classify model saw), and what reached this render call (``candidates``
-are exactly the rendered plan, ``render_evidence`` maps a candidate id to
-the fragment ids actually quoted to it and ``render_evidence_omitted`` to
-the ids dropped for the budget, so an incomplete set is never marked
-complete). Every candidate joins its events through ``evidence_refs`` ->
-``evidence_shown``; ``candidates_rejected`` lists the thread's classify
-rejections with their reason.
+the classify model saw), and what reached this generation call
+(``candidates`` are exactly its plan, ``generation_evidence`` maps a
+candidate id to the fragment ids actually quoted to it and
+``generation_evidence_omitted`` to the ids dropped for the budget, so an
+incomplete set is never marked complete). Every candidate joins its events
+through ``evidence_refs`` -> ``evidence_shown``; ``candidates_rejected``
+lists the thread's classify rejections with their reason.
 
-Version history: v4 adds ``policy`` (requested, selection, source), ``demo``,
+Version history: v5 renames the SKILL.md stage from render to generate:
+``render_evidence`` / ``render_evidence_omitted`` became
+``generation_evidence`` / ``generation_evidence_omitted``, and the stage key
+``render`` of ``prompt_variants``, ``prompt_hashes`` and
+``config.requested.prompts`` became ``generate``.
+v4 adds ``policy`` (requested, selection, source), ``demo``,
 ``config`` (requested, effective), ``versions``, ``prompt_hashes``
 (``sha256:<hex>`` per stage), ``quality_review``, ``verification``
 (level, note), ``observed_procedure_source`` (the physical lines of the
@@ -50,7 +55,7 @@ observed_procedure episodes this plan cites), ``covering_skill``,
 ``target.base_sha256`` for updates, redacted evidence text and the package
 secrets guard; ``/skill-review`` additionally reads ``demo`` and
 ``policy.selection`` (absent in older proposals: not a demo). v3 scoped the
-record to the rendered plan; v2 held every kept candidate of the thread and
+record to its plan; v2 held every kept candidate of the thread and
 the whole registry in each proposal; v1 (no ``provenance_version``) has seqs
 in ``candidates[].evidence_refs`` and no registry. Every version shares
 ``category``, ``thread_ids``, ``generated_at`` and ``target``.
@@ -68,7 +73,7 @@ from typing import Any
 from msagent.skill_evolver.bundle import EvidenceBundle
 from msagent.skill_evolver.classify import Candidate
 from msagent.skill_evolver.features import FEATURES_VERSION
-from msagent.skill_evolver.render import select_render_evidence
+from msagent.skill_evolver.generate import select_generation_evidence
 from msagent.skill_evolver.validator import NAME_RE, redact_secrets, scan_secrets
 
 PROPOSALS_DIR = ".proposals"
@@ -76,9 +81,9 @@ SKILL_FILE = "SKILL.md"
 PROVENANCE_FILE = "provenance.json"
 # Version of the provenance.json contract: 1 (unversioned) predates the
 # evidence registry, 2 recorded the whole thread in every proposal, 3 is
-# scoped to the rendered plan, 4 adds policy/demo/review/verification; see
-# the module docstring.
-PROVENANCE_VERSION = 4
+# scoped to its plan, 4 adds policy/demo/review/verification, 5 renames the
+# render stage keys to generation/generate; see the module docstring.
+PROVENANCE_VERSION = 5
 REQUIRED_PROVENANCE_KEYS: frozenset[str] = frozenset(
     {
         "provenance_version",
@@ -102,7 +107,7 @@ REQUIRED_PROVENANCE_KEYS: frozenset[str] = frozenset(
 # ``verification.level`` values: the generator only ever records the first.
 VERIFICATION_LEVELS = ("evidence_supported", "execution_verified")
 # Stages whose template hash every proposal records.
-PROMPT_HASH_STAGES = ("classify", "render", "review")
+PROMPT_HASH_STAGES = ("classify", "generate", "review")
 # Keys of the ``policy`` record.
 POLICY_KEYS = ("requested", "selection", "source")
 # Upper bound of the -2, -3, ... suffix search for one proposal name.
@@ -172,15 +177,15 @@ def build_provenance(
     quality_review: Mapping[str, Any],
     verification: Mapping[str, str],
     covering_skill: Mapping[str, Any] | None = None,
-    render_evidence: Mapping[str, Sequence[str]] | None = None,
-    render_evidence_omitted: Mapping[str, Sequence[str]] | None = None,
+    generation_evidence: Mapping[str, Sequence[str]] | None = None,
+    generation_evidence_omitted: Mapping[str, Sequence[str]] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """The JSON record that says where one proposal came from.
 
-    ``candidates`` are exactly the candidates rendered into this SKILL.md
-    (one plan) and ``rejected`` the thread's classify rejections with why.
-    ``thread_ids`` keep their order (the analysed thread first) minus
+    ``candidates`` are exactly the candidates this SKILL.md was generated
+    from (one plan) and ``rejected`` the thread's classify rejections with
+    why. ``thread_ids`` keep their order (the analysed thread first) minus
     duplicates; ``sources`` maps every cited file name to its path;
     ``category`` is the library folder a new skill is meant for and
     ``target`` names the skill an update revises (with ``base_sha256`` of
@@ -190,13 +195,13 @@ def build_provenance(
     stages, ``quality_review`` is the review record and ``verification``
     ``{level, note}`` with a level of :data:`VERIFICATION_LEVELS`.
     ``covering_skill`` names the library skill a demo proposal duplicates.
-    ``render_evidence`` / ``render_evidence_omitted`` are the renderer's
-    actual selection; when None they are recomputed without a budget.
-    ``observed_procedure_source`` is derived from the bundle. Evidence text
-    is stored redacted. ``generated_at`` defaults to now (UTC, ISO 8601).
-    Raises ``ValueError`` for a demo proposal that is not a create, an
-    update without ``base_sha256``, an unknown verification level, or
-    incomplete ``policy`` / ``prompt_hashes``.
+    ``generation_evidence`` / ``generation_evidence_omitted`` are the
+    generation call's actual selection; when None they are recomputed
+    without a budget. ``observed_procedure_source`` is derived from the
+    bundle. Evidence text is stored redacted. ``generated_at`` defaults to
+    now (UTC, ISO 8601). Raises ``ValueError`` for a demo proposal that is
+    not a create, an update without ``base_sha256``, an unknown
+    verification level, or incomplete ``policy`` / ``prompt_hashes``.
     """
     if not isinstance(demo, bool):
         raise ValueError(f"demo must be a bool, got {type(demo).__name__}")
@@ -267,10 +272,10 @@ def build_provenance(
         and any(item.ref in cited_refs for item in outcome.episode.evidence)
         for item in outcome.episode.evidence
     ]
-    if render_evidence is None:
-        render_evidence = {c.candidate_id: select_render_evidence(c, shown).ids for c in candidates}
-    if render_evidence_omitted is None:
-        render_evidence_omitted = {candidate.candidate_id: [] for candidate in candidates}
+    if generation_evidence is None:
+        generation_evidence = {c.candidate_id: select_generation_evidence(c, shown).ids for c in candidates}
+    if generation_evidence_omitted is None:
+        generation_evidence_omitted = {candidate.candidate_id: [] for candidate in candidates}
     return {
         "provenance_version": PROVENANCE_VERSION,
         "thread_ids": ordered,
@@ -282,8 +287,8 @@ def build_provenance(
             {"title": candidate.title, "reason": reason, "evidence_refs": list(candidate.evidence_refs)}
             for candidate, reason in rejected
         ],
-        "render_evidence": {cid: list(ids) for cid, ids in render_evidence.items()},
-        "render_evidence_omitted": {cid: list(ids) for cid, ids in render_evidence_omitted.items()},
+        "generation_evidence": {cid: list(ids) for cid, ids in generation_evidence.items()},
+        "generation_evidence_omitted": {cid: list(ids) for cid, ids in generation_evidence_omitted.items()},
         "observed_procedure_source": observed_source,
         "model": model,
         "prompt_variants": dict(prompt_variants),

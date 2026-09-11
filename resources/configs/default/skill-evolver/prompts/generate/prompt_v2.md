@@ -1,16 +1,35 @@
-## description: Renders accepted knowledge candidates into one SKILL.md that follows the required structure
+## description: Generates one SKILL.md from accepted candidates under the effective selection policy (contract_version 2)
+## contract_version: 2
 
-# SKILL.md renderer
+# SKILL.md generator
 
 You write exactly one `SKILL.md` from knowledge candidates that a classifier accepted from a completed agent session. Each candidate is one durable rule: a title, an imperative rule, its expected future applicability and its target (a new skill, or an existing skill to update). When the classifier could establish them, a candidate also carries `When` (the condition under which the rule applies), `Constraints` (limits that must hold) and `Expected outcome` (what following the rule produced), plus `Evidence` lines: short cuts of the recorded events the rule was distilled from. You do not see the session, and you do not judge the candidates again: every accepted rule must be represented in the skill you write.
+
+How to read an `Evidence` line:
+
+- `user: …` — the task the user asked for, in the user's words.
+- `tool.start <tool>: {…}` — one action with its real arguments, exactly as recorded.
+- `tool.result <tool> (ok): …` — the real output of that action; this is the observed result.
+- `tool.error <tool> (error): …` — a failure with the head and tail of its error text.
+- `ai: …` — the agent's own statement; it is not proof of anything.
+- `(N context excerpts omitted for the prompt budget)` — more context existed; do not guess what it said.
+
+# Selection policy
+
+{generation_policy}
 
 # Task
 
 - If the "Existing skill" section below contains a skill, reply with the **full revised text** of that skill: keep its `name`, integrate every rule, keep the durable content that still holds, and migrate the text to the required structure below.
-- Otherwise create a new skill. Choose a durable kebab-case name that describes the task class or decision domain: lowercase letters, digits and hyphens only; never a ticket, PR or issue number, and never a name such as `fix-...`, `debug-...` or `audit-...` that only makes sense for one task.
-- Place every rule where a future agent will act on it: a `## Workflow` step, a `## Constraints` entry, or the `## Inputs` / `## Outputs` sections. Phrase rules positively (what to do), never as folklore about what is broken or must never be used.
+- Otherwise create a new skill. Choose a durable kebab-case name that describes the task class or decision domain: lowercase letters, digits and hyphens only; never a ticket, PR or issue number, and never a name such as `fix-...`, `debug-...` or `audit-...` that only makes sense for one task. The selection policy above may prescribe a name prefix.
+- State the `## Inputs` with their format (a CSV file with a header row, a column name, a path, an expected value); list the prerequisites the procedure depends on.
+- Write concrete actions with the exact command or call shape the evidence shows, the expected result of each action and how to verify it. Never claim that a test or verification ran unless the evidence shows it ran; describe the check as something the future agent does.
+- Replace one-time values (paths, ids, hosts, timestamps, the outputs of this run) with `<parameter>` placeholders and say what goes into them, but keep the durable file names, column names and environment conventions the procedure depends on.
+- Never add a command, flag, API, version, unit, dependency or guarantee of success that the candidates and their evidence do not show.
+- A genuinely one-operation procedure gets exactly one `## Workflow` step; do not pad it with filler steps.
+- Place every rule where a future agent will act on it: a `## Workflow` step, a `## Constraints` entry, or the `## Inputs` / `## Outputs` sections. Phrase rules positively (what to do). A prohibition or safety constraint must come from the evidence (the failure it prevents is shown), never from general opinion about a tool.
 - Use `When` as the trigger of the step or constraint, `Constraints` as `## Constraints` entries or conditions inside the step, and `Expected outcome` as the completion criterion of the step or in `## Outputs`. A candidate without these fields gets no invented condition: state the rule as given.
-- Use the `Evidence` lines only to make the rule precise — the exact argument, flag or error class involved. Never copy one-time values from them (paths, ids, timestamps, hostnames, outputs of that run).
+- Use the `Evidence` lines only to make the rule precise — the exact argument, flag, output or error class involved.
 - Do not narrate the session. Do not include seq numbers, evidence ids such as `ev3`, thread ids, tickets, file names of one session, or any other one-time detail.
 
 # Accepted candidates
@@ -49,6 +68,8 @@ description: Use when <clear proactive trigger describing when this skill should
 ...
 n. <Step>
 
+(one step when the procedure is one operation)
+
 ## Outputs
 
 <What the skill is expected to produce, change, validate, or report.>
@@ -59,7 +80,7 @@ n. <Step>
 
 ## Examples
 
-<Optional. Small reusable examples that clarify non-obvious usage or decision points.>
+<Optional. Small reusable examples that clarify subtle usage or decision points.>
 ```
 
 The following rules are mandatory.
@@ -190,7 +211,7 @@ For example, avoid:
 3. Run the command.
 4. Read the output.
 
-unless one of those actions contains a non-obvious requirement.
+unless one of those actions contains a requirement that is easy to miss.
 
 ### Conditional workflow
 
@@ -268,7 +289,7 @@ Examples:
 
 Constraints should primarily express durable boundaries.
 
-Prefer positive formulations where possible.
+Prefer positive formulations where possible. Prohibitions are allowed when the evidence shows the failure they prevent.
 
 GOOD:
 
@@ -297,7 +318,7 @@ only when a concise example materially improves correct application of the skill
 Examples are most useful for:
 
 - ambiguous trigger conditions;
-- non-obvious workflow branches;
+- workflow branches that are easy to miss;
 - correct vs incorrect application;
 - expected command or file patterns;
 - representative inputs and outputs.

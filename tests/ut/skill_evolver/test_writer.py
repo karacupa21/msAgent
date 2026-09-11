@@ -136,7 +136,7 @@ def _bundle() -> EvidenceBundle:
 POLICY = {"requested": "strict_knowledge", "selection": "strict_knowledge", "source": "config"}
 CONFIG = {"requested": {"schema_version": 2}, "effective": {"policy": "strict_knowledge", "demo": False}}
 VERSIONS = {"config_schema": 2, "prompts_contract": 2}
-PROMPT_HASHES = {"classify": "sha256:c", "render": "sha256:r", "review": "sha256:v"}
+PROMPT_HASHES = {"classify": "sha256:c", "generate": "sha256:g", "review": "sha256:v"}
 QUALITY_REVIEW = {
     "verdict": "pass",
     "issues": [],
@@ -148,7 +148,7 @@ QUALITY_REVIEW = {
 VERIFICATION = {"level": "evidence_supported", "note": "not executed by generator"}
 PROMPT_VARIANTS = {
     "classify": "classify/prompt_v2.md",
-    "render": "render/prompt_v2.md",
+    "generate": "generate/prompt_v2.md",
     "review": "review/prompt_v2.md",
 }
 CREATE_TARGET = {"action": "create", "existing_skill": None, "existing_path": None, "base_sha256": None}
@@ -240,14 +240,14 @@ def test_build_provenance_maps_episodes_candidates_and_evidence() -> None:
         rejected=[(rejected, "evidence not shown in the bundle: ['ev9']")],
         sources={SOURCE: "/t/a.jsonl", "thread-other.jsonl": "/t/b.jsonl"},
         model="fake-model",
-        prompt_variants={"classify": "c", "render": "r", "review": "v"},
+        prompt_variants={"classify": "c", "generate": "g", "review": "v"},
         category="profiler",
         target=UPDATE_TARGET,
         generated_at="2026-09-04T10:00:00+00:00",
         **_v4_kwargs(),
     )
 
-    assert provenance["provenance_version"] == PROVENANCE_VERSION == 4
+    assert provenance["provenance_version"] == PROVENANCE_VERSION == 5
     assert provenance["features_version"] == FEATURES_VERSION == 5
     assert provenance["thread_ids"] == [THREAD_ID, "thread-other"]
     assert provenance["sources"] == {SOURCE: "/t/a.jsonl", "thread-other.jsonl": "/t/b.jsonl"}
@@ -308,11 +308,11 @@ def test_build_provenance_maps_episodes_candidates_and_evidence() -> None:
     assert provenance["candidates_rejected"] == [
         {"title": "Fabricated", "reason": "evidence not shown in the bundle: ['ev9']", "evidence_refs": ["ev1", "ev9"]}
     ]
-    # What the renderer was quoted, per rendered candidate (recomputed without a budget when not given).
-    assert provenance["render_evidence"] == {"c1": ["ev1", "ev2"]}
-    assert provenance["render_evidence_omitted"] == {"c1": []}
+    # What the generation call was quoted, per candidate of the plan (recomputed without a budget when not given).
+    assert provenance["generation_evidence"] == {"c1": ["ev1", "ev2"]}
+    assert provenance["generation_evidence_omitted"] == {"c1": []}
     assert provenance["generated_at"] == "2026-09-04T10:00:00+00:00"
-    assert provenance["prompt_variants"] == {"classify": "c", "render": "r", "review": "v"}
+    assert provenance["prompt_variants"] == {"classify": "c", "generate": "g", "review": "v"}
     assert provenance["category"] == "profiler"
     assert provenance["target"] == UPDATE_TARGET
     assert REQUIRED_PROVENANCE_KEYS <= set(provenance)
@@ -321,12 +321,12 @@ def test_build_provenance_maps_episodes_candidates_and_evidence() -> None:
 def test_build_provenance_records_v4_fields() -> None:
     provenance = _provenance()
 
-    assert provenance["provenance_version"] == PROVENANCE_VERSION == 4
+    assert provenance["provenance_version"] == PROVENANCE_VERSION == 5
     assert provenance["features_version"] == FEATURES_VERSION == 5
     assert provenance["policy"] == POLICY
     assert provenance["demo"] is False
     assert provenance["config"] == CONFIG
-    assert provenance["versions"] == {"features": 5, "provenance": 4, "config_schema": 2, "prompts_contract": 2}
+    assert provenance["versions"] == {"features": 5, "provenance": 5, "config_schema": 2, "prompts_contract": 2}
     assert provenance["prompt_hashes"] == PROMPT_HASHES
     assert provenance["prompt_variants"] == PROMPT_VARIANTS
     assert provenance["quality_review"] == QUALITY_REVIEW
@@ -367,14 +367,14 @@ def _provenance_with(**overrides: Any) -> dict[str, Any]:
     return build_provenance(**kwargs)
 
 
-def test_build_provenance_uses_given_render_evidence_and_omitted() -> None:
-    given = _provenance_with(render_evidence={"c1": ["ev1"]}, render_evidence_omitted={"c1": ["ev2"]})
-    assert given["render_evidence"] == {"c1": ["ev1"]}
-    assert given["render_evidence_omitted"] == {"c1": ["ev2"]}
+def test_build_provenance_uses_given_generation_evidence_and_omitted() -> None:
+    given = _provenance_with(generation_evidence={"c1": ["ev1"]}, generation_evidence_omitted={"c1": ["ev2"]})
+    assert given["generation_evidence"] == {"c1": ["ev1"]}
+    assert given["generation_evidence_omitted"] == {"c1": ["ev2"]}
 
     recomputed = _provenance_with()
-    assert recomputed["render_evidence"] == {"c1": ["ev1", "ev2"]}
-    assert recomputed["render_evidence_omitted"] == {"c1": []}
+    assert recomputed["generation_evidence"] == {"c1": ["ev1", "ev2"]}
+    assert recomputed["generation_evidence_omitted"] == {"c1": []}
 
 
 def test_build_provenance_derives_observed_procedure_source() -> None:
@@ -455,7 +455,7 @@ def test_build_provenance_rejects_demo_update_and_missing_base_hash() -> None:
     with pytest.raises(ValueError, match=r"policy is missing \['source'\]"):
         _provenance_with(policy={"requested": "strict_knowledge", "selection": "strict_knowledge"})
     with pytest.raises(ValueError, match=r"prompt_hashes is missing \['review'\]"):
-        _provenance_with(prompt_hashes={"classify": "sha256:c", "render": "sha256:r"})
+        _provenance_with(prompt_hashes={"classify": "sha256:c", "generate": "sha256:g"})
     assert VERIFICATION_LEVELS == ("evidence_supported", "execution_verified")
     assert _provenance_with(verification={"level": "execution_verified", "note": "ran"})["verification"]["level"] == (
         "execution_verified"
@@ -495,7 +495,7 @@ def _scoped(candidates: list[Candidate]) -> dict[str, Any]:
     )
 
 
-def test_build_provenance_is_scoped_to_the_rendered_plan() -> None:
+def test_build_provenance_is_scoped_to_its_plan() -> None:
     a = _candidate(candidate_id="c1", evidence_refs=["ev1", "ev2"])
     b = _candidate(title="Other", rule="Only B says so.", candidate_id="c2", evidence_refs=["ev3"])
 
@@ -504,7 +504,7 @@ def test_build_provenance_is_scoped_to_the_rendered_plan() -> None:
 
     assert set(for_a["evidence_shown"]) == {"ev1", "ev2"}
     assert [c["candidate_id"] for c in for_a["candidates"]] == ["c1"]
-    assert for_a["render_evidence"] == {"c1": ["ev1", "ev2"]}
+    assert for_a["generation_evidence"] == {"c1": ["ev1", "ev2"]}
     # The episode row stays complete; events this plan does not cite have no id.
     assert [i["id"] for i in for_a["episodes"][0]["evidence"]] == ["ev1", "ev2", None, None]
     dumped = json.dumps(for_a, ensure_ascii=False)
@@ -512,7 +512,7 @@ def test_build_provenance_is_scoped_to_the_rendered_plan() -> None:
 
     assert set(for_b["evidence_shown"]) == {"ev3"}
     assert [c["candidate_id"] for c in for_b["candidates"]] == ["c2"]
-    assert for_b["render_evidence"] == {"c2": ["ev3"]}
+    assert for_b["generation_evidence"] == {"c2": ["ev3"]}
     assert [i["id"] for i in for_b["episodes"][0]["evidence"]] == [None, None, "ev3", None]
     assert '"cmd": "make"' not in json.dumps(for_b, ensure_ascii=False)
 
@@ -521,7 +521,7 @@ def test_build_provenance_ignores_refs_outside_the_registry() -> None:
     provenance = _scoped([_candidate(candidate_id="c1", evidence_refs=["ev1", "ev9"])])
 
     assert set(provenance["evidence_shown"]) == {"ev1"}
-    assert provenance["render_evidence"] == {"c1": ["ev1"]}
+    assert provenance["generation_evidence"] == {"c1": ["ev1"]}
 
 
 # -------------------------------------------------------------------- writer
@@ -537,7 +537,7 @@ def test_write_proposal_writes_skill_and_provenance(tmp_path: Path) -> None:
     provenance = json.loads((path.parent / "provenance.json").read_text(encoding="utf-8"))
     assert REQUIRED_PROVENANCE_KEYS <= set(provenance)
     assert provenance["features_version"] == 5
-    assert provenance["provenance_version"] == 4
+    assert provenance["provenance_version"] == 5
     assert provenance["demo"] is False and provenance["policy"]["selection"] == "strict_knowledge"
     assert sorted(p.name for p in path.parent.iterdir()) == ["SKILL.md", "provenance.json"]
     assert not (root / "default").exists()
@@ -770,12 +770,12 @@ def test_provenance_shown_fragments_resolve_to_source_lines(tmp_path: Path, fixt
     )
 
     stored = json.loads((path.parent / "provenance.json").read_text(encoding="utf-8"))
-    assert stored["provenance_version"] == 4
+    assert stored["provenance_version"] == 5
     assert stored["observed_procedure_source"] == []
     assert stored["thread_ids"] == [trajectory.thread_id]
     assert stored["sources"] == {source.name: str(source)}
     shown = stored["evidence_shown"]
-    # Scoped to what the rendered candidate cites, not the whole registry.
+    # Scoped to what the plan's candidate cites, not the whole registry.
     assert set(shown) == set(cited) <= set(bundle.shown)
     for fragment_id, entry in shown.items():
         assert entry["source"] == source.name
@@ -800,5 +800,5 @@ def test_provenance_shown_fragments_resolve_to_source_lines(tmp_path: Path, fixt
     assert stored["candidates_rejected"] == [
         {"title": "Fabricated", "reason": "evidence not shown in the bundle: ['ev999']", "evidence_refs": ["ev999"]}
     ]
-    assert set(stored["render_evidence"]) == {"c1"}
-    assert set(stored["render_evidence"]["c1"]) <= set(cited)
+    assert set(stored["generation_evidence"]) == {"c1"}
+    assert set(stored["generation_evidence"]["c1"]) <= set(cited)

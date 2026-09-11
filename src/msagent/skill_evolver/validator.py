@@ -16,13 +16,13 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""Code validation of a rendered SKILL.md.
+"""Code validation of a generated SKILL.md.
 
-:func:`validate_skill_md` checks the text the render stage produced against
-the structure the render prompt demands: YAML frontmatter with a durable
-``name`` (with the ``demo-`` prefix when ``required_prefix`` asks for it) and
-a proactive ``description``, the mandatory ``Inputs`` / ``Workflow`` /
-``Outputs`` sections, a numbered workflow of at least one step, non-empty
+:func:`validate_skill_md` checks the text the generation stage produced
+against the structure the generation prompt demands: YAML frontmatter with a
+durable ``name`` (with the ``demo-`` prefix when ``required_prefix`` asks for
+it) and a proactive ``description``, the mandatory ``Inputs`` / ``Workflow``
+/ ``Outputs`` sections, a numbered workflow of at least one step, non-empty
 optional sections, no negative tool folklore and no secret-looking value.
 Every violation is reported, because the corrective LLM call needs the whole
 list; nothing is repaired.
@@ -358,7 +358,7 @@ def validate_skill_md(
     taken_names: Collection[str] = (),
     required_prefix: str | None = None,
 ) -> ValidationResult:
-    """Check a rendered SKILL.md; every violation is listed, nothing is repaired.
+    """Check a generated SKILL.md; every violation is listed, nothing is repaired.
 
     ``expected_name`` is the name of the skill being updated: the frontmatter
     name must equal it, and the naming rules for new skills are skipped.

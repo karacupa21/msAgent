@@ -63,7 +63,7 @@ HEADER_LINES = 5
 LEGACY_CONTRACT = 1
 REQUIRED_PLACEHOLDERS: dict[str, tuple[str, ...]] = {
     "classify": ("{skill_library}", "{evidence_bundle}", "{selection_policy}"),
-    "render": ("{candidates}", "{existing_skill}", "{render_policy}"),
+    "generate": ("{candidates}", "{existing_skill}", "{generation_policy}"),
     "review": ("{skill_md}", "{candidates}", "{evidence}", "{existing_skill}", "{review_policy}"),
 }
 
@@ -85,7 +85,7 @@ class PromptText:
 @dataclass(frozen=True, slots=True)
 class StagePrompts:
     classify: PromptText
-    render: PromptText
+    generate: PromptText
     review: PromptText
 
     def get(self, stage: str) -> PromptText:

@@ -39,7 +39,7 @@ Intensive tests therefore do three extra things:
 
 What intensive tests still do **not** do (on purpose):
 
-- call the classify / render LLM;
+- call the classify / generate LLM;
 - write a `SKILL.md` and score it with a human rubric;
 - crawl a customer project’s private `trajectories/*.jsonl` (that is
   the live procedure in §7, run on your machine).

@@ -804,7 +804,7 @@ def test_packaged_classify_prompt_contract() -> None:
     # text can never contradict a demo policy.
     for forbidden in ("Non-obviousness", "Novelty", "trivial"):
         assert forbidden not in text, forbidden
-    for render_marker in (
+    for generation_marker in (
         "# Required SKILL.md structure",
         "## Inputs",
         "## Workflow",
@@ -812,7 +812,7 @@ def test_packaged_classify_prompt_contract() -> None:
         "frontmatter",
         "Nothing to save.",
     ):
-        assert render_marker not in text, render_marker
+        assert generation_marker not in text, generation_marker
 
 
 def test_packaged_v1_prompt_stays_for_hash_comparison() -> None:

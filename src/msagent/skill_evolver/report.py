@@ -18,7 +18,7 @@
 
 """Decision report: why a thread did or did not produce a proposal.
 
-Rules of REPORT_VERSION 1:
+Rules of REPORT_VERSION 2:
 
 * One JSON file per thread and non-dry run at
   ``<ProjectPaths.root>/skill-evolver/decisions/<batch_dir_name(thread)>-<UTC>.json``
@@ -33,7 +33,7 @@ Rules of REPORT_VERSION 1:
   config {requested, effective}, prompts {contract_version, variants, hashes},
   episodes {total, counts, detector_notes}, gate, second_gate, bundles[],
   stages[], classifier {verdict, candidates, decisions, rejected},
-  code_rejections[], plans {rendered, proposals, render_errors,
+  code_rejections[], plans {generated, proposals, generation_errors,
   rejected_targets, deferred}, quality_review[], coverage[], proposals[],
   llm {model, context_window, calls_used, limit, bound, budget_exhausted,
   note}, stop_message, failed``.
@@ -46,6 +46,13 @@ Rules of REPORT_VERSION 1:
   ``rejected_draft_files``; never a proposal, never under the skills root.
 * A thread is ``synthetic`` when its agent name or a component of its
   working directory contains ``synthetic``.
+* Version history: 2 renames the SKILL.md stage from render to generate —
+  ``plans.rendered`` / ``plans.render_errors`` became ``plans.generated`` /
+  ``plans.generation_errors``, the code ``render_invalid``
+  (``code_rejections``, ``stages``, draft notes) became
+  ``generation_invalid``, and the stage key ``render`` of
+  ``prompts.variants`` / ``prompts.hashes`` and ``config.requested.prompts``
+  became ``generate``.
 
 Stdlib only (plus the thread-folder name rule of :mod:`msagent.skill_evolver.writer`).
 """
@@ -63,7 +70,7 @@ from typing import Any
 
 from msagent.skill_evolver.writer import MAX_COLLISIONS, batch_dir_name
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 DECISIONS_DIR = ("skill-evolver", "decisions")
 SYNTHETIC_MARKER = "synthetic"
 TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S%fZ"

@@ -38,10 +38,10 @@ that makes the answer trustworthy happens here, in code:
   ``model_verdict`` keeps what the model said.
 
 Kept candidates get a ``candidate_id`` (``c1``, ``c2``, ...) that provenance
-and the render stage use to join them. The model's per-episode ``decisions``
-(with a ``reason_code``) travel unchanged for the decision report; a
-``nothing`` verdict explained by ``insufficient_evidence`` is the signal the
-pipeline may answer with one context-expanded round.
+and the generation stage use to join them. The model's per-episode
+``decisions`` (with a ``reason_code``) travel unchanged for the decision
+report; a ``nothing`` verdict explained by ``insufficient_evidence`` is the
+signal the pipeline may answer with one context-expanded round.
 
 The template reaches :func:`classify` with ``{skill_library}`` and
 ``{selection_policy}`` already substituted by the caller (``str.replace``);
@@ -148,11 +148,11 @@ class Candidate(BaseModel):
     so a seq number or a boolean never passes as a citation. The conditions
     of the rule — ``applies_when``, ``constraints``, ``expected_outcome`` —
     are optional: the prompt tells the model to leave them empty rather than
-    invent them, and the renderer shows only what is filled. ``covered_by``
-    names the library skill that already covers the procedure when the
-    policy still asks for a candidate (demo keeps ``target.action``
-    ``create``). ``candidate_id`` is assigned by :func:`classify` to the
-    kept candidates, never by the model.
+    invent them, and the generation prompt shows only the conditions that
+    are filled. ``covered_by`` names the library skill that already covers
+    the procedure when the policy still asks for a candidate (demo keeps
+    ``target.action`` ``create``). ``candidate_id`` is assigned by
+    :func:`classify` to the kept candidates, never by the model.
     """
 
     title: str

@@ -15,13 +15,13 @@ on_nothing:
   action: expand_context_once       # stop | expand_context_once (one more classify round, only on insufficient_evidence)
 generation:
   max_plans_per_thread: 3           # SKILL.md proposals per thread; extra plans are listed as deferred
-  max_llm_calls_per_thread: 16      # every ainvoke counts: classify, retries, render, corrections, quality review
+  max_llm_calls_per_thread: 16      # every ainvoke counts: classify, retries, generation, corrections, quality review
   category: default                 # library category recorded in provenance (one directory name)
   output_dir: null                  # null -> <working_dir>/skills; a relative path is resolved against working_dir
 prompts:
   contract_version: 2               # each prompt file must declare '## contract_version: 2' in its header
   classify: prompt_v2.md            # file names inside skill-evolver/prompts/<stage>/ (user copy first, then packaged)
-  render: prompt_v2.md
+  generate: prompt_v2.md
   review: prompt_v2.md
 diagnostics:
   save_decision_report: true        # <project state>/skill-evolver/decisions/<thread>-<utc>.json, also when nothing is saved

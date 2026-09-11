@@ -39,10 +39,11 @@ commands build a :class:`RunContext` once per run and hand it a
    ``nothing`` for ``insufficient_evidence`` and the expanded bundle shows a
    strict superset of the fragments shown before;
 9. the ``Nothing to save`` message by cause;
-10. render plans, with the referenced skills' text read for the coverage
-    note (the classifier's claim is never confirmed);
-11. the plan loop: :func:`render_plan` (render, validate, semantic review,
-    one correction, provenance v4, proposal) under the LLM call budget.
+10. generation plans, with the referenced skills' text read for the
+    coverage note (the classifier's claim is never confirmed);
+11. the plan loop: :func:`generate_for_plan` (generate, validate, semantic
+    review, one correction, provenance v5, proposal) under the LLM call
+    budget.
 
 A decision report is written in ``finally`` for every non-dry run
 (``RunContext.report_dir``), also when the gate refused the thread or the
@@ -113,32 +114,32 @@ from msagent.skill_evolver.features import (
     gate_decision,
     mine_cross_session,
 )
+from msagent.skill_evolver.generate import (
+    INSUFFICIENT_CONTEXT_BUDGET,
+    NO_EXISTING_SKILL,
+    EvidenceSelection,
+    GenerationPlan,
+    GenerationPlans,
+    format_candidates,
+    format_existing_skill,
+    plan_generation,
+    resolve_library_skill,
+)
 from msagent.skill_evolver.policy import (
     DEMO_NAME_PREFIX,
-    render_policy_block,
+    generation_policy_block,
     review_policy_block,
     selection_policy_block,
 )
 from msagent.skill_evolver.prompts import PromptContractError, PromptText, StagePrompts, prompt_sha256
-from msagent.skill_evolver.render import (
-    INSUFFICIENT_CONTEXT_BUDGET,
-    NO_EXISTING_SKILL,
-    EvidenceSelection,
-    RenderPlan,
-    RenderPlans,
-    format_candidates,
-    format_existing_skill,
-    plan_render,
-    resolve_library_skill,
-)
 from msagent.skill_evolver.report import draft_file_names, is_synthetic, write_report
 from msagent.skill_evolver.retrieval import BM25Index
 from msagent.skill_evolver.review import (
+    GENERATION_INVALID,
     QUALITY_REVIEW_FAILED,
-    RENDER_INVALID,
     VERIFICATION_EVIDENCE_SUPPORTED,
     format_review_candidates,
-    render_and_review,
+    generate_and_review,
 )
 from msagent.skill_evolver.validator import skill_name
 from msagent.skill_evolver.writer import SKILL_FILE, SecretsDetected, build_provenance, scan_package, write_proposal
@@ -148,9 +149,9 @@ from msagent.trajectory_recorder.reader import Trajectory
 logger = get_logger(__name__)
 
 REJECTED = "SKILL.md rejected after one correction; nothing written:"
-# Characters of an existing skill handed to the renderer and the reviewer.
+# Characters of an existing skill handed to the generation call and the reviewer.
 EXISTING_SKILL_MAX_CHARS = 20000
-# Code rejections raised by this module (the others come from classify, render, review, bundle).
+# Code rejections raised by this module (the others come from classify, generate, review, bundle).
 CODE_BUDGET_EXHAUSTED = "budget_exhausted"
 CODE_SECRETS_DETECTED = "secrets_detected"
 CODE_EXISTING_SKILL_UNREADABLE = "existing_skill_unreadable"
@@ -208,7 +209,7 @@ class RunContext:
     prompts: StagePrompts
     skills: list[Skill]
     llm_slot: LazyLlm
-    # Names a new skill must not reuse; mutated by render_plan across threads.
+    # Names a new skill must not reuse; mutated by generate_for_plan across threads.
     taken: set[str]
     # The handler's console at call time (patched spies are honoured).
     sink: Any
@@ -244,7 +245,7 @@ class CodeRejection:
 
 @dataclass(frozen=True, slots=True)
 class PlanContext:
-    """What every render plan of one thread shares: provenance inputs and the output root."""
+    """What every generation plan of one thread shares: provenance inputs and the output root."""
 
     thread_id: str
     thread_ids: list[str]
@@ -269,19 +270,20 @@ class PlanContext:
 class PlanOutcome:
     """One plan's result: the written proposal, or why nothing was written."""
 
-    plan: RenderPlan
+    plan: GenerationPlan
     calls: int
     skill_path: Path | None = None
     name: str | None = None
-    # Validator errors of the last render try (render_invalid), or the rejection's details.
+    # Validator errors of the last generation try (generation_invalid), or the rejection's details.
     errors: list[str] = field(default_factory=list)
     rejection: CodeRejection | None = None
-    # ``RenderedSkill.review_record()`` when a review happened.
+    # ``GeneratedSkill.review_record()`` when a review happened.
     review: dict[str, Any] | None = None
     verification: dict[str, str] = field(default_factory=lambda: dict(VERIFICATION_EVIDENCE_SUPPORTED))
-    # Non-fatal notes for the handler's console (render_plan itself never prints).
+    # Non-fatal notes for the handler's console (generate_for_plan itself never prints).
     warnings: list[str] = field(default_factory=list)
-    # The refused plan's last SKILL.md draft (render_invalid, quality review failed); None when nothing was rendered.
+    # The refused plan's last SKILL.md draft (generation_invalid, quality review failed);
+    # None when nothing was generated.
     draft: str | None = None
 
     @property
@@ -291,13 +293,13 @@ class PlanOutcome:
 
 @dataclass(slots=True)
 class PlanTally:
-    """Counters over the render plans of one thread (or, summed, of a run)."""
+    """Counters over the generation plans of one thread (or, summed, of a run)."""
 
-    # Plans that ran: proposals + render_errors.
+    # Plans that ran: proposals + generation_errors.
     plans: int = 0
     proposals: int = 0
     # A double validation failure, a rejection or an exception inside the plan.
-    render_errors: int = 0
+    generation_errors: int = 0
     # Candidates whose target was unknown or ambiguous.
     rejected: int = 0
     deferred: int = 0
@@ -305,18 +307,18 @@ class PlanTally:
     @property
     def flagged(self) -> bool:
         """Whether anything besides clean proposals happened."""
-        return bool(self.render_errors or self.rejected or self.deferred)
+        return bool(self.generation_errors or self.rejected or self.deferred)
 
     def add(self, other: PlanTally) -> None:
         self.plans += other.plans
         self.proposals += other.proposals
-        self.render_errors += other.render_errors
+        self.generation_errors += other.generation_errors
         self.rejected += other.rejected
         self.deferred += other.deferred
 
     def describe(self) -> str:
         """The plan-level part of a summary line."""
-        return f"{self.render_errors} render errors, {self.rejected} rejected targets, {self.deferred} deferred"
+        return f"{self.generation_errors} generation errors, {self.rejected} rejected targets, {self.deferred} deferred"
 
 
 @dataclass(slots=True)
@@ -468,7 +470,7 @@ def cited_threads(current: Trajectory, episodes: list[Episode]) -> list[str]:
     return [current.thread_id, *sorted(others)]
 
 
-def report_plans(plans: RenderPlans, coverage: Sequence[str] = ()) -> tuple[list[str], list[str]]:
+def report_plans(plans: GenerationPlans, coverage: Sequence[str] = ()) -> tuple[list[str], list[str]]:
     """Warnings (rejected targets) and notes (references, deferred plans) for the console.
 
     ``coverage`` is aligned with ``plans.references`` (COVERAGE_TEXT_READ or
@@ -499,7 +501,7 @@ def skill_library_snapshot(skills: Sequence[Skill]) -> str:
     return "\n".join(lines)
 
 
-def target_record(plan: RenderPlan, base_sha256: str | None = None) -> dict[str, str | None]:
+def target_record(plan: GenerationPlan, base_sha256: str | None = None) -> dict[str, str | None]:
     """Provenance ``target``: new skill, or the library skill being revised (with the hash of its file)."""
     if plan.existing is None:
         return {"action": "create", "existing_skill": None, "existing_path": None}
@@ -511,7 +513,7 @@ def target_record(plan: RenderPlan, base_sha256: str | None = None) -> dict[str,
     }
 
 
-def activation_hint(skill_path: Path, name: str, plan: RenderPlan, library_dir: Path) -> str:
+def activation_hint(skill_path: Path, name: str, plan: GenerationPlan, library_dir: Path) -> str:
     """Tell the user the proposal is inactive and how to promote it by hand."""
     folder = skill_path.parent
     if plan.existing is None:
@@ -639,7 +641,7 @@ def bundle_preview(thread: ThreadInput, rules: EffectiveRules) -> list[str]:
     return lines
 
 
-# ------------------------------------------------------------ render_plan
+# ------------------------------------------------------ generate_for_plan
 
 
 def _evidence_room(
@@ -647,10 +649,10 @@ def _evidence_room(
     prompts: StagePrompts,
     candidates: Sequence[Candidate],
     existing_text: str | None,
-    render_policy: str,
+    generation_policy: str,
     review_policy: str,
 ) -> int | None:
-    """Characters the quoted evidence may take: the larger of the render and review prompts' overhead.
+    """Characters the quoted evidence may take: the larger of the generation and review prompts' overhead.
 
     The review prompt also carries the SKILL.md itself, which the budget's
     reply reserve covers; None when the window is unknown.
@@ -659,20 +661,20 @@ def _evidence_room(
         return None
     empty = [EvidenceSelection([], [], []) for _ in candidates]
     existing = existing_text or NO_EXISTING_SKILL
-    render_overhead = (
-        len(prompts.render.text)
-        + len(render_policy)
+    generation_overhead = (
+        len(prompts.generate.text)
+        + len(generation_policy)
         + len(format_candidates(candidates, selections=empty))
         + len(existing)
     )
     review_overhead = (
         len(prompts.review.text) + len(review_policy) + len(format_review_candidates(candidates)) + len(existing)
     )
-    return budget.room_for(max(render_overhead, review_overhead))
+    return budget.room_for(max(generation_overhead, review_overhead))
 
 
-async def render_plan(
-    plan: RenderPlan,
+async def generate_for_plan(
+    plan: GenerationPlan,
     *,
     llm: Any,
     prompts: StagePrompts,
@@ -681,7 +683,7 @@ async def render_plan(
     budget: ContextBudget,
     rules: EffectiveRules,
 ) -> PlanOutcome:
-    """Render one plan, review it, write its proposal; never prints (the handlers do).
+    """Generate one plan's SKILL.md, review it, write its proposal; never prints (the handlers do).
 
     A create checks its name against ``taken`` and, once written, adds the
     new name to it; an update passes ``expected_name`` instead, leaves
@@ -709,14 +711,14 @@ async def render_plan(
         expected_name = plan.existing.name
         base_sha256 = existing.sha256
 
-    render_policy = render_policy_block(rules.demo)
+    generation_policy = generation_policy_block(rules.demo)
     review_policy = review_policy_block(rules.demo)
-    rendered = await render_and_review(
+    generated = await generate_and_review(
         plan.candidates,
         llm=llm,
-        render_template=prompts.render.text,
+        generation_template=prompts.generate.text,
         review_template=prompts.review.text,
-        render_policy=render_policy,
+        generation_policy=generation_policy,
         review_policy=review_policy,
         evidence=context.bundle.shown,
         existing_skill=existing_text,
@@ -725,19 +727,24 @@ async def render_plan(
         taken_names=taken_names,
         required_prefix=DEMO_NAME_PREFIX if rules.demo and plan.existing is None else None,
         evidence_budget_chars=_evidence_room(
-            budget, prompts, plan.candidates, existing_text, render_policy, review_policy
+            budget, prompts, plan.candidates, existing_text, generation_policy, review_policy
         ),
     )
-    if rendered.code == RENDER_INVALID:
-        return PlanOutcome(plan, rendered.calls, errors=list(rendered.errors), draft=rendered.draft)
-    review = rendered.review_record() if rendered.review is not None else None
-    if rendered.code is not None:
-        rejection = CodeRejection(rendered.code, plan.label, "; ".join(rendered.errors))
+    if generated.code == GENERATION_INVALID:
+        return PlanOutcome(plan, generated.calls, errors=list(generated.errors), draft=generated.draft)
+    review = generated.review_record() if generated.review is not None else None
+    if generated.code is not None:
+        rejection = CodeRejection(generated.code, plan.label, "; ".join(generated.errors))
         return PlanOutcome(
-            plan, rendered.calls, errors=list(rendered.errors), rejection=rejection, review=review, draft=rendered.draft
+            plan,
+            generated.calls,
+            errors=list(generated.errors),
+            rejection=rejection,
+            review=review,
+            draft=generated.draft,
         )
 
-    name = skill_name(rendered.content)
+    name = skill_name(generated.content)
     covered_by = next((c.covered_by for c in plan.candidates if c.covered_by), None)
     covering, warning = await asyncio.to_thread(covering_skill_record, covered_by, context.skills)
     warnings = [warning] if warning else []
@@ -761,16 +768,16 @@ async def render_plan(
             "prompts_contract": context.contract_version,
         },
         prompt_hashes=context.prompt_hashes,
-        quality_review=rendered.review_record(),
+        quality_review=generated.review_record(),
         verification=VERIFICATION_EVIDENCE_SUPPORTED,
         covering_skill=covering,
-        render_evidence=rendered.render_evidence,
-        render_evidence_omitted=rendered.render_evidence_omitted,
+        generation_evidence=generated.generation_evidence,
+        generation_evidence_omitted=generated.generation_evidence_omitted,
     )
     try:
         skill_path = await asyncio.to_thread(
             write_proposal,
-            rendered.content,
+            generated.content,
             root=context.output_root,
             name=name,
             provenance=provenance,
@@ -779,11 +786,11 @@ async def render_plan(
     except SecretsDetected as exc:
         rejection = CodeRejection(CODE_SECRETS_DETECTED, plan.label, str(exc))
         return PlanOutcome(
-            plan, rendered.calls, errors=[str(exc)], rejection=rejection, review=review, warnings=warnings
+            plan, generated.calls, errors=[str(exc)], rejection=rejection, review=review, warnings=warnings
         )
     if plan.existing is None:
         taken.add(name)
-    return PlanOutcome(plan, rendered.calls, skill_path=skill_path, name=name, review=review, warnings=warnings)
+    return PlanOutcome(plan, generated.calls, skill_path=skill_path, name=name, review=review, warnings=warnings)
 
 
 def rejection_lines(label: str, outcome: PlanOutcome) -> list[str]:
@@ -798,7 +805,10 @@ def rejection_lines(label: str, outcome: PlanOutcome) -> list[str]:
         head = f"plan {label}: quality review failed after one correction; nothing written:"
         return [head, *(f"  - {error}" for error in outcome.errors)]
     if rejection.code == INSUFFICIENT_CONTEXT_BUDGET:
-        head = f"plan {label}: required evidence does not fit the render budget ({INSUFFICIENT_CONTEXT_BUDGET}); nothing written:"
+        head = (
+            f"plan {label}: required evidence does not fit the evidence budget "
+            f"({INSUFFICIENT_CONTEXT_BUDGET}); nothing written:"
+        )
         return [head, *(f"  - {error}" for error in outcome.errors)]
     return [f"plan {label}: {rejection.detail}"]
 
@@ -1086,7 +1096,7 @@ class _ThreadRun:
 
     async def _plans(self, classification: Classification, bundle: EvidenceBundle) -> None:
         run, rules, result, sink = self.run, self.rules, self.result, self.sink
-        plans = plan_render(classification.candidates, run.skills, max_plans=rules.max_plans)
+        plans = plan_generation(classification.candidates, run.skills, max_plans=rules.max_plans)
         result.coverage = await asyncio.to_thread(reference_coverage, plans.references)
         warnings, notes = report_plans(plans, [row["coverage"] for row in result.coverage])
         for line in warnings:
@@ -1100,7 +1110,7 @@ class _ThreadRun:
         tally.rejected = len(plans.rejected)
         tally.deferred = len(plans.deferred)
         if not plans.plans:
-            self._stop("Nothing to save: no candidate left to render")
+            self._stop("Nothing to save: no candidate left for generation")
             return
 
         context = PlanContext(
@@ -1133,8 +1143,8 @@ class _ThreadRun:
                 continue
             tally.plans += 1
             try:
-                with status(sink, f"Rendering SKILL.md (plan {position}/{total}: {escape(label)})..."):
-                    outcome = await render_plan(
+                with status(sink, f"Generating SKILL.md (plan {position}/{total}: {escape(label)})..."):
+                    outcome = await generate_for_plan(
                         plan,
                         llm=llm,
                         prompts=run.prompts,
@@ -1144,16 +1154,16 @@ class _ThreadRun:
                         rules=rules,
                     )
             except LlmBudgetExhausted as exc:
-                tally.render_errors += 1
+                tally.generation_errors += 1
                 result.budget_stop = True
                 result.code_rejections.append(CodeRejection(CODE_BUDGET_EXHAUSTED, label, str(exc)))
                 sink.print_error(escape(f"plan {label}: {exc}; SKILL.md not written"))
                 result.stages.append(StageOutcome(f"plan {label}", "rejected", CODE_BUDGET_EXHAUSTED))
                 continue
             except Exception as exc:
-                tally.render_errors += 1
+                tally.generation_errors += 1
                 sink.print_error(escape(f"plan {label}: {exc}"))
-                logger.exception("Rendering plan %s of thread %s failed", label, self.thread_id)
+                logger.exception("Generating SKILL.md for plan %s of thread %s failed", label, self.thread_id)
                 result.stages.append(StageOutcome(f"plan {label}", "error", str(exc)))
                 continue
             for line in outcome.warnings:
@@ -1161,7 +1171,7 @@ class _ThreadRun:
             if outcome.review is not None:
                 result.quality_reviews.append({"plan": label, **outcome.review})
             if outcome.rejection is not None:
-                tally.render_errors += 1
+                tally.generation_errors += 1
                 result.code_rejections.append(outcome.rejection)
                 for line in rejection_lines(label, outcome):
                     sink.print_error(escape(line))
@@ -1169,13 +1179,13 @@ class _ThreadRun:
                 self._keep_draft(label, outcome.rejection.code, outcome)
                 continue
             if not outcome.written:
-                tally.render_errors += 1
-                result.code_rejections.append(CodeRejection(RENDER_INVALID, label, "; ".join(outcome.errors)))
+                tally.generation_errors += 1
+                result.code_rejections.append(CodeRejection(GENERATION_INVALID, label, "; ".join(outcome.errors)))
                 sink.print_error(escape(f"plan {label}: {REJECTED}"))
                 for error in outcome.errors:
                     sink.print_error(escape(f"  - {error}"))
-                result.stages.append(StageOutcome(f"plan {label}", "rejected", RENDER_INVALID))
-                self._keep_draft(label, RENDER_INVALID, outcome)
+                result.stages.append(StageOutcome(f"plan {label}", "rejected", GENERATION_INVALID))
+                self._keep_draft(label, GENERATION_INVALID, outcome)
                 continue
             tally.proposals += 1
             result.proposals.append(str(outcome.skill_path))
@@ -1252,9 +1262,9 @@ def build_report(run: RunContext, thread: ThreadInput, result: ThreadResult) -> 
         },
         "code_rejections": [asdict(rejection) for rejection in result.code_rejections],
         "plans": {
-            "rendered": tally.plans,
+            "generated": tally.plans,
             "proposals": tally.proposals,
-            "render_errors": tally.render_errors,
+            "generation_errors": tally.generation_errors,
             "rejected_targets": tally.rejected,
             "deferred": tally.deferred,
         },

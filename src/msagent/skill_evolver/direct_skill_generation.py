@@ -20,11 +20,12 @@
 
 The command never touches the analysed thread and never writes into the
 skill library. Evidence is extracted from the thread's trajectory file by
-code, classified, rendered and reviewed by the LLM, validated by code again,
-and written as a proposal under ``<skills root>/.proposals/`` for a human to
-review and move. The per-thread stages live in
-:mod:`msagent.skill_evolver.pipeline`, shared with /skill-mine; this module
-parses the command line, loads config and prompts and gathers the evidence.
+code and classified by the LLM; a SKILL.md is generated from it and reviewed
+by the LLM, validated by code again, and written as a proposal under
+``<skills root>/.proposals/`` for a human to review and move. The per-thread
+stages live in :mod:`msagent.skill_evolver.pipeline`, shared with
+/skill-mine; this module parses the command line, loads config and prompts
+and gathers the evidence.
 """
 
 from __future__ import annotations
@@ -69,9 +70,9 @@ from msagent.skill_evolver.pipeline import (
     collect_episodes,
     draft_lines,
     gate_lines,
+    generate_for_plan,
     load_prompts,
     print_policy_block,
-    render_plan,
     report_bundle,
     report_config_error,
     report_plans,
@@ -88,6 +89,7 @@ from msagent.skills.factory import Skill
 from msagent.trajectory_recorder.export import (
     find_trajectory_file,
     resolve_trajectories_dir,
+    workspace_filter,
 )
 from msagent.trajectory_recorder.reader import (
     Trajectory,
@@ -241,7 +243,12 @@ class DirectSkillGenerationHandler:
         work = Path(ctx.working_dir)
         state_dir = initializer.get_project_paths(work).root
         trajectories_dir = resolve_trajectories_dir(state_dir=state_dir)
-        trajectory_path = find_trajectory_file(trajectories_dir, thread_id)
+        workspace = workspace_filter(work)
+        trajectory_path = find_trajectory_file(
+            trajectories_dir,
+            thread_id,
+            workspace=workspace,
+        )
         if trajectory_path is None:
             where = f"thread {thread_id} in {trajectories_dir}"
             msg = f"No recorded trajectory for {where}; the LLM was not called"
@@ -259,6 +266,7 @@ class DirectSkillGenerationHandler:
                 skills,
                 cross_session_limit=rules.cross_session_limit,
                 demo=rules.demo,
+                workspace=workspace,
             )
         thread = ThreadInput(current, others, episodes, notes)
         print_policy_block(console, cfg, rules)
@@ -287,7 +295,7 @@ class DirectSkillGenerationHandler:
         # A refused plan is a warning: the thread ran to its end and its report says why nothing was written.
         if result.stop_message is None and (tally.flagged or tally.plans > 1):
             line = f"Plans: {tally.proposals} proposals, {tally.describe()}"
-            report = console.print_warning if tally.render_errors else console.print_info
+            report = console.print_warning if tally.generation_errors else console.print_info
             report(line)
         sources = ", ".join(f"{stage}={source}" for stage, source in prompts.variants().items())
         console.print(f"[muted]Prompts: {escape(sources)}[/muted]")
@@ -316,17 +324,20 @@ class DirectSkillGenerationHandler:
         *,
         cross_session_limit: int = CROSS_SESSION_LIMIT,
         demo: bool = False,
+        workspace: Path | None = None,
     ) -> tuple[Trajectory, list[Trajectory], list[Episode], list[DetectorNote]]:
         """Load the thread's trajectory plus the agent's newest; detect episodes.
 
         Returns the trajectory, the other trajectories its episodes cite (the
         evidence bundle must index them), the episodes and the detector notes
-        (why observed_procedure candidates were dropped, demo only).
+        (why observed_procedure candidates were dropped, demo only). In the
+        shared store ``workspace`` keeps the newest to this workspace's threads.
         """
         current = load_trajectory(trajectory_path)
         newest = load_trajectories(
             trajectories_dir,
             agent=agent,
+            workspace=workspace,
             limit=cross_session_limit,
         )
         others = [traj for traj in newest if traj.thread_id != current.thread_id]
@@ -339,7 +350,7 @@ class DirectSkillGenerationHandler:
     _report_bundle = staticmethod(report_bundle)
     _cited_threads = staticmethod(cited_threads)
     _report_plans = staticmethod(report_plans)
-    _render_plan = staticmethod(render_plan)
+    _generate_for_plan = staticmethod(generate_for_plan)
     _target_record = staticmethod(target_record)
     _activation_hint = staticmethod(activation_hint)
     _skill_library_snapshot = staticmethod(skill_library_snapshot)

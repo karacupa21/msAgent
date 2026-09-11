@@ -59,11 +59,11 @@ def _write(path: Path, text: str) -> Path:
 
 @pytest.fixture
 def packaged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A fake packaged prompts root: prompt_v2.md for every stage, prompt_v1.md for classify and render."""
+    """A fake packaged prompts root: prompt_v2.md for every stage, prompt_v1.md for classify and generate."""
     root = tmp_path / "packaged" / "prompts"
     for stage in STAGES:
         _write(root / stage / "prompt_v2.md", _v2(stage, description=f"packaged {stage}"))
-    for stage in ("classify", "render"):
+    for stage in ("classify", "generate"):
         _write(root / stage / "prompt_v1.md", V1_TEXT)
     monkeypatch.setattr(module, "packaged_prompts_root", lambda: root)
     return root
@@ -99,7 +99,7 @@ def test_stage_prompts_accessors() -> None:
     }
     prompts = StagePrompts(**texts)
 
-    assert prompts.variants() == {"classify": "/p/classify.md", "render": "/p/render.md", "review": "/p/review.md"}
+    assert prompts.variants() == {"classify": "/p/classify.md", "generate": "/p/generate.md", "review": "/p/review.md"}
     assert prompts.hashes() == {stage: prompt_sha256(f"{stage} text") for stage in STAGES}
     assert prompts.get("review") is texts["review"]
     with pytest.raises(ValueError, match="Unknown prompt stage 'get'"):
@@ -114,12 +114,12 @@ def test_user_file_wins_over_packaged_then_packaged(packaged: Path, user_root: P
     notes: list[str] = []
 
     mine = resolve_stage_prompt(user_root, DirectSkillGenerationConfig(), "classify", notes=notes)
-    theirs = resolve_stage_prompt(user_root, DirectSkillGenerationConfig(), "render", notes=notes)
+    theirs = resolve_stage_prompt(user_root, DirectSkillGenerationConfig(), "generate", notes=notes)
 
     assert (mine.source, mine.stage, mine.contract_version) == (str(user), "classify", 2)
     assert mine.text == user.read_text(encoding="utf-8")
     assert mine.sha256 == prompt_sha256(mine.text)
-    assert theirs.source == str(packaged / "render" / "prompt_v2.md")
+    assert theirs.source == str(packaged / "generate" / "prompt_v2.md")
     assert notes == []
 
 
@@ -168,12 +168,12 @@ def test_stage_prompt_requires_declared_contract(packaged: Path, user_root: Path
 
 
 def test_v2_config_pointing_at_a_contract_1_file_gets_the_migration_text(packaged: Path, user_root: Path) -> None:
-    cfg = DirectSkillGenerationConfig(render_prompt="prompt_v1.md")
+    cfg = DirectSkillGenerationConfig(generate_prompt="prompt_v1.md")
 
     with pytest.raises(PromptContractError, match="declares contract_version 1") as info:
-        resolve_stage_prompt(user_root, cfg, "render", notes=[])
+        resolve_stage_prompt(user_root, cfg, "generate", notes=[])
 
-    assert "set prompts.render: prompt_v2.md" in str(info.value)
+    assert "set prompts.generate: prompt_v2.md" in str(info.value)
 
 
 @pytest.mark.parametrize("stage", STAGES)
@@ -201,9 +201,9 @@ def test_legacy_prompt_file_rule(packaged: Path, user_root: Path) -> None:
     ]
 
     # Byte-identical seeded copy: still packaged prompt_v2.md.
-    _write(user_root / "render" / "prompt_v1.md", V1_TEXT)
-    identical = resolve_stage_prompt(user_root, LEGACY_CFG, "render", notes=notes)
-    assert identical.source == str(packaged / "render" / "prompt_v2.md")
+    _write(user_root / "generate" / "prompt_v1.md", V1_TEXT)
+    identical = resolve_stage_prompt(user_root, LEGACY_CFG, "generate", notes=notes)
+    assert identical.source == str(packaged / "generate" / "prompt_v2.md")
     assert len(notes) == 2
 
     # Review stage never had a prompt_v1.md: packaged prompt_v2.md as well.
@@ -248,7 +248,7 @@ def test_packaged_prompts_root_points_into_resources() -> None:
 
     assert root == REAL_PACKAGED
     assert (root / "classify" / "prompt_v1.md").is_file()
-    assert (root / "render" / "prompt_v1.md").is_file()
+    assert (root / "generate" / "prompt_v1.md").is_file()
 
 
 @pytest.mark.parametrize("stage", STAGES)

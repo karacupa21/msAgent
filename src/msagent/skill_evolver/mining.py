@@ -92,6 +92,7 @@ from msagent.skills.factory import Skill
 from msagent.trajectory_recorder.export import (
     find_trajectory_file,
     resolve_trajectories_dir,
+    workspace_filter,
 )
 from msagent.trajectory_recorder.reader import (
     Trajectory,
@@ -446,6 +447,13 @@ def build_episodes_table(stats: list[ThreadStats]) -> Table:
 # ----------------------------------------------------------------- selection
 
 
+def _where(trajectories_dir: Path, workspace: Path | None) -> str:
+    """Where a selection looked, naming the workspace in the shared store."""
+    if workspace is None:
+        return f"in {trajectories_dir}"
+    return f"in {trajectories_dir} for workspace {workspace}"
+
+
 def select_trajectories(
     trajectories_dir: Path,
     *,
@@ -453,6 +461,7 @@ def select_trajectories(
     options: MineOptions,
     now: float,
     cross_session_limit: int = CROSS_SESSION_LIMIT,
+    workspace: Path | None = None,
 ) -> tuple[list[Trajectory], list[Trajectory]]:
     """Pick the threads to mine plus the cross-session pool behind them.
 
@@ -462,7 +471,8 @@ def select_trajectories(
     is always present and means last activity, while ``started_at`` is the
     first event's timestamp and may be empty. Because the listing is already
     mtime-descending, the filter is a contiguous prefix. Note that mtime does
-    not survive copying files between machines.
+    not survive copying files between machines. ``workspace`` narrows targets
+    and pool to one workspace of the shared store (``workspace_filter``).
     """
     if not trajectories_dir.is_dir() or not any(trajectories_dir.glob("*.jsonl")):
         raise MineSelectionError(
@@ -472,16 +482,23 @@ def select_trajectories(
     listing = load_trajectories(
         trajectories_dir,
         agent=agent,
+        workspace=workspace,
         limit=max(options.threads, cross_session_limit),
     )
     pool = listing[:cross_session_limit]
 
     if options.thread is not None:
-        return [_resolve_thread(trajectories_dir, options.thread, pool)], pool
+        target = _resolve_thread(
+            trajectories_dir,
+            options.thread,
+            pool,
+            workspace=workspace,
+        )
+        return [target], pool
 
     if not listing:
         hint = "use --thread <id> for another agent's session"
-        where = f"in {trajectories_dir}"
+        where = _where(trajectories_dir, workspace)
         raise MineSelectionError(
             f"No trajectories for agent '{agent}' {where}; {hint}",
         )
@@ -504,14 +521,16 @@ def _resolve_thread(
     trajectories_dir: Path,
     thread: str,
     pool: list[Trajectory],
+    *,
+    workspace: Path | None = None,
 ) -> Trajectory:
     """Resolve --thread to one trajectory; the id may be a unique prefix."""
-    path = find_trajectory_file(trajectories_dir, thread)
+    path = find_trajectory_file(trajectories_dir, thread, workspace=workspace)
     if path is None:
         # find_trajectory_file returns None both for "no match" and for an
         # ambiguous prefix, so one message has to cover both.
         hint = "give a full id or a unique prefix"
-        where = f"in {trajectories_dir}"
+        where = _where(trajectories_dir, workspace)
         raise MineSelectionError(
             f"No recorded trajectory for thread '{thread}' {where}; {hint}",
         )
@@ -599,6 +618,7 @@ class SkillMiningHandler:
         rules = effective_rules(cfg, working_dir=Path(ctx.working_dir))
         state_dir = initializer.get_project_paths(Path(ctx.working_dir)).root
         trajectories_dir = resolve_trajectories_dir(state_dir=state_dir)
+        workspace = workspace_filter(Path(ctx.working_dir))
         skills = await self._load_skills()
         now = time.time()
 
@@ -611,6 +631,7 @@ class SkillMiningHandler:
                 skills,
                 now,
                 rules,
+                workspace,
             )
 
         self._report_selection(stats, options, agent=ctx.agent)
@@ -639,6 +660,7 @@ class SkillMiningHandler:
         skills: list[Skill],
         now: float,
         rules: EffectiveRules,
+        workspace: Path | None = None,
     ) -> list[ThreadStats]:
         """Blocking part of a run: read the JSONL files and detect episodes."""
         targets, pool = select_trajectories(
@@ -647,6 +669,7 @@ class SkillMiningHandler:
             options=options,
             now=now,
             cross_session_limit=rules.cross_session_limit,
+            workspace=workspace,
         )
         return mine_stats(targets, pool, skills, demo=rules.demo)
 
@@ -775,15 +798,15 @@ class SkillMiningHandler:
                 unwritten += 1
 
         # Every thread lands in exactly one of: with a proposal, skipped by the
-        # gate, nothing to save, rejected at render, failed (proposals are counted, not threads).
+        # gate, nothing to save, rejected at generation, failed (proposals are counted, not threads).
         summary = (
             f"Mined {len(stats)} threads: {total.proposals} proposals,"
             f" {below} skipped by the gate, {nothing} nothing to save,"
-            f" {unwritten} rejected at render, {len(failed)} failed"
+            f" {unwritten} rejected at generation, {len(failed)} failed"
         )
         if failed:
             report = console.print_error
-        elif total.render_errors:
+        elif total.generation_errors:
             report = console.print_warning
         elif total.proposals:
             report = console.print_success
@@ -794,7 +817,7 @@ class SkillMiningHandler:
             console.print_error(escape(f"Failed threads: {', '.join(failed)}"))
         if total.flagged:
             line = f"Plans: {total.describe()}"
-            (console.print_warning if total.render_errors else console.print_info)(line)
+            (console.print_warning if total.generation_errors else console.print_info)(line)
         console.print("")
 
     async def _mine_thread(

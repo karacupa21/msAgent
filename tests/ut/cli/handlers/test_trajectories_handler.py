@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,3 +182,67 @@ async def test_unknown_subcommand(browser) -> None:
 
     assert any("Unknown subcommand" in line for line in browser.spy.error)
     assert any("show <thread-id>" in line for line in browser.spy.plain)
+
+
+# ------------------------------------------------------------ shared store
+
+
+@pytest.fixture
+def shared(browser, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The browser over the shared store (output.scope: shared)."""
+    config = tmp_path / "config.trajectory.recorder.yml"
+    config.write_text("output:\n  scope: shared\n", encoding="utf-8")
+    monkeypatch.setenv("MSAGENT_TRAJECTORY_CONFIG", str(config))
+    reset_config_cache()
+    browser.directory = module.initializer.app_paths.state_dir / "trajectories"
+    browser.directory.mkdir(parents=True)
+    return browser
+
+
+def _place_in(directory: Path, thread_id: str, working_dir: Path) -> Path:
+    """The signals fixture as recorded in ``working_dir`` under ``thread_id``."""
+    lines: list[str] = []
+    for raw in SIGNALS.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        event = json.loads(raw)
+        event["thread_id"] = thread_id
+        if event.get("event") == "recorder.attach":
+            event["working_dir"] = str(working_dir)
+        lines.append(json.dumps(event, ensure_ascii=False))
+    target = directory / f"{AGENT}_{thread_id}.jsonl"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+@pytest.mark.asyncio
+async def test_shared_list_shows_only_this_workspace(shared, tmp_path: Path) -> None:
+    _place_in(shared.directory, "t-mine", tmp_path)
+    _place_in(shared.directory, "t-theirs", tmp_path / "elsewhere")
+
+    await shared.handler.handle(["list"])
+
+    assert shared.spy.error == []
+    text = shared.spy.rendered_text()
+    assert "t-mine" in text
+    assert "t-theirs" not in text
+
+
+@pytest.mark.asyncio
+async def test_shared_list_of_an_idle_workspace_names_it(shared, tmp_path: Path) -> None:
+    _place_in(shared.directory, "t-theirs", tmp_path / "elsewhere")
+
+    await shared.handler.handle(["list"])
+
+    assert any("No trajectories recorded" in line and "for workspace" in line for line in shared.spy.info)
+    assert shared.spy.renderables == []
+
+
+@pytest.mark.asyncio
+async def test_shared_show_refuses_another_workspaces_thread(shared, tmp_path: Path) -> None:
+    _place_in(shared.directory, "t-theirs", tmp_path / "elsewhere")
+
+    await shared.handler.handle(["show", "t-theirs"])
+
+    assert any("No recorded trajectory" in line and "for workspace" in line for line in shared.spy.error)
+    assert shared.spy.renderables == []

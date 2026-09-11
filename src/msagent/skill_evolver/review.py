@@ -16,25 +16,25 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""Semantic review of a rendered SKILL.md against its candidates and evidence.
+"""Semantic review of a generated SKILL.md against its candidates and evidence.
 
 Rules:
 
 * :func:`review_skill_md` shows the reviewer the accepted candidates (with
-  their ids), the evidence fragments the renderer was quoted (with their
-  ``ev`` ids — the reviewer must cite them), the existing skill text for an
-  update, and the SKILL.md; it answers with one strict JSON object
+  their ids), the evidence fragments the generation call was quoted (with
+  their ``ev`` ids — the reviewer must cite them), the existing skill text
+  for an update, and the SKILL.md; it answers with one strict JSON object
   (:class:`ReviewReply`): ``pass`` with no issues, or ``fail`` with at least
   one coded issue. One parse retry is spent (the same idiom as classify and
-  render); a second failure is :class:`ReviewContractError`. An issue citing
-  an id the renderer never saw is kept and reported in ``unknown_refs`` with
-  a warning, never dropped.
+  generate); a second failure is :class:`ReviewContractError`. An issue
+  citing an id the generation call never saw is kept and reported in
+  ``unknown_refs`` with a warning, never dropped.
 * A ``pass`` means "faithful to the candidates and evidence", never "the
   procedure was executed" or "works everywhere": the generator runs nothing,
   which :data:`VERIFICATION_EVIDENCE_SUPPORTED` records in provenance.
-* :func:`render_and_review` is the per-plan stage both commands call:
-  render (≤ 2 calls) → validate → review (≤ 2) → on ``fail`` one corrective
-  render (1) → validate → review (1); at most 6 ``ainvoke`` per plan. A plan
+* :func:`generate_and_review` is the per-plan stage both commands call:
+  generate (≤ 2 calls) → validate → review (≤ 2) → on ``fail`` one corrective
+  revision (1) → validate → review (1); at most 6 ``ainvoke`` per plan. A plan
   whose required evidence does not fit the budget, or whose selection is
   empty, is refused before any call (``insufficient_context_budget``).
   :class:`~msagent.skill_evolver.budget.LlmBudgetExhausted` is not caught
@@ -66,11 +66,11 @@ from msagent.skill_evolver.classify import (
     strip_code_fence,
     strip_think_blocks,
 )
-from msagent.skill_evolver.render import (
+from msagent.skill_evolver.generate import (
     INSUFFICIENT_CONTEXT_BUDGET,
     NO_EXISTING_SKILL,
-    RenderResult,
-    render_skill_md,
+    GenerationResult,
+    generate_skill_md,
     revise_skill_md,
     select_plan_evidence,
 )
@@ -92,8 +92,8 @@ _PLACEHOLDERS = (
 )
 # One pass, so a placeholder-looking string inside the SKILL.md or a rule is never substituted.
 _PLACEHOLDER_RE = re.compile(r"\{(skill_md|candidates|evidence|existing_skill|review_policy)\}")
-# Code rejections of render_and_review.
-RENDER_INVALID = "render_invalid"
+# Code rejections of generate_and_review.
+GENERATION_INVALID = "generation_invalid"
 QUALITY_REVIEW_FAILED = "quality_review_failed"
 # Provenance ``verification`` of every proposal this stage passes: nothing was executed.
 VERIFICATION_EVIDENCE_SUPPORTED: dict[str, str] = {"level": "evidence_supported", "note": "not executed by generator"}
@@ -159,7 +159,7 @@ class ReviewReply(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ReviewResult:
-    """One review round: the verdict, its issues, the ids it cited but the renderer never saw, the calls spent."""
+    """One review round: the verdict, its issues, the cited ids the generation call never saw, the calls spent."""
 
     verdict: Literal["pass", "fail"]
     issues: list[ReviewIssue]
@@ -180,23 +180,23 @@ class ReviewResult:
 
 
 @dataclass(frozen=True, slots=True)
-class RenderedSkill:
-    """Outcome of :func:`render_and_review` for one plan; ``ok`` when ``code`` is None."""
+class GeneratedSkill:
+    """Outcome of :func:`generate_and_review` for one plan; ``ok`` when ``code`` is None."""
 
     content: str | None
     validation: ValidationResult | None
     review: ReviewResult | None
-    render_evidence: dict[str, list[str]]
-    render_evidence_omitted: dict[str, list[str]]
+    generation_evidence: dict[str, list[str]]
+    generation_evidence_omitted: dict[str, list[str]]
     calls: int
-    # RENDER_INVALID | QUALITY_REVIEW_FAILED | INSUFFICIENT_CONTEXT_BUDGET, None on success.
+    # GENERATION_INVALID | QUALITY_REVIEW_FAILED | INSUFFICIENT_CONTEXT_BUDGET, None on success.
     code: str | None = None
     errors: list[str] = field(default_factory=list)
-    # ``corrected``: the plan passed only after the one corrective render. ``initial_issues`` is
-    # what the first review found whenever a corrective render ran — on the pass and the fail path.
+    # ``corrected``: the plan passed only after the one corrective revision. ``initial_issues`` is
+    # what the first review found whenever a corrective revision ran — on the pass and the fail path.
     corrected: bool = False
     initial_issues: list[str] = field(default_factory=list)
-    # The last SKILL.md the model produced when the plan was refused (render_invalid, quality
+    # The last SKILL.md the model produced when the plan was refused (generation_invalid, quality
     # review failed): kept for the decision report's rejected-draft file, never written as a proposal.
     draft: str | None = None
 
@@ -232,7 +232,7 @@ def parse_review_reply(raw: str) -> ReviewReply:
 
 
 def format_review_candidates(candidates: Sequence[Candidate]) -> str:
-    """Candidate blocks for the reviewer: the same conditions as the renderer saw, plus ids and citations."""
+    """Candidate blocks for the reviewer: the same conditions as the generation call saw, plus ids and citations."""
     blocks: list[str] = []
     for number, candidate in enumerate(candidates, start=1):
         target = candidate.target
@@ -254,7 +254,7 @@ def format_review_candidates(candidates: Sequence[Candidate]) -> str:
 
 
 def format_review_evidence(fragments: Sequence[ShownFragment]) -> str:
-    """One line per fragment the renderer saw, ids shown, order kept, duplicates by id dropped."""
+    """One line per fragment the generation call saw, ids shown, order kept, duplicates by id dropped."""
     lines: list[str] = []
     seen: set[str] = set()
     for fragment in fragments:
@@ -282,9 +282,9 @@ async def review_skill_md(
 ) -> ReviewResult:
     """Ask the reviewer whether ``skill_md`` is faithful to ``candidates`` and ``fragments``.
 
-    ``fragments`` are exactly what the renderer was quoted; ``existing_skill_text``
-    is the formatted existing skill of an update (None for a new skill);
-    ``policy_text`` fills ``{review_policy}``. One parse retry when
+    ``fragments`` are exactly what the generation call was quoted;
+    ``existing_skill_text`` is the formatted existing skill of an update (None for
+    a new skill); ``policy_text`` fills ``{review_policy}``. One parse retry when
     ``corrective_retry``; a further failure raises :class:`ReviewContractError`.
     Raises ``ValueError`` before any call for a blank SKILL.md, no candidates,
     no fragments or a template missing a placeholder.
@@ -335,12 +335,12 @@ async def review_skill_md(
     cited = [ref for issue in reply.issues for ref in issue.evidence_refs]
     unknown_refs = [ref for ref in dict.fromkeys(cited) if ref not in known]
     if unknown_refs:
-        logger.warning("review: issues cite evidence not shown to the renderer: %s", unknown_refs)
+        logger.warning("review: issues cite evidence not shown to the generation call: %s", unknown_refs)
     return ReviewResult(reply.verdict, list(reply.issues), unknown_refs, calls)
 
 
 def _quoted_fragments(candidates: Sequence[Candidate], selections: Sequence[Any]) -> list[ShownFragment]:
-    """The union of what the renderer saw, in quoting order, deduplicated by id."""
+    """The union of what the generation call saw, in quoting order, deduplicated by id."""
     fragments: list[ShownFragment] = []
     seen: set[str] = set()
     for selection in selections:
@@ -355,33 +355,36 @@ def _failed(
     code: str,
     errors: list[str],
     *,
-    rendered: RenderResult | None,
+    generated: GenerationResult | None,
     review: ReviewResult | None,
     calls: int,
     initial_issues: Sequence[str] = (),
-) -> RenderedSkill:
-    """A rejected plan: nothing may be written; ``rendered`` keeps the selection, validation and draft for the record."""
-    return RenderedSkill(
+) -> GeneratedSkill:
+    """A rejected plan: nothing may be written.
+
+    ``generated`` keeps the selection, validation and draft for the record.
+    """
+    return GeneratedSkill(
         content=None,
-        validation=rendered.validation if rendered is not None else None,
+        validation=generated.validation if generated is not None else None,
         review=review,
-        render_evidence=dict(rendered.render_evidence) if rendered is not None else {},
-        render_evidence_omitted=dict(rendered.render_evidence_omitted) if rendered is not None else {},
+        generation_evidence=dict(generated.generation_evidence) if generated is not None else {},
+        generation_evidence_omitted=dict(generated.generation_evidence_omitted) if generated is not None else {},
         calls=calls,
         code=code,
         errors=errors,
         initial_issues=list(initial_issues),
-        draft=rendered.content if rendered is not None else None,
+        draft=generated.content if generated is not None else None,
     )
 
 
-async def render_and_review(
+async def generate_and_review(
     candidates: Sequence[Candidate],
     *,
     llm: Any,
-    render_template: str,
+    generation_template: str,
     review_template: str,
-    render_policy: str,
+    generation_policy: str,
     review_policy: str,
     evidence: Mapping[str, ShownFragment],
     existing_skill: str | None = None,
@@ -390,33 +393,33 @@ async def render_and_review(
     taken_names: Collection[str] = (),
     required_prefix: str | None = None,
     evidence_budget_chars: int | None = None,
-) -> RenderedSkill:
-    """Render one plan, validate it, review it, correct once; at most 6 LLM calls.
+) -> GeneratedSkill:
+    """Generate one plan's SKILL.md, validate it, review it, correct once; at most 6 LLM calls.
 
-    ``existing_skill`` is the formatted existing skill for the renderer and
-    ``existing_skill_text`` the same for the reviewer (both None for a new
-    skill). The outcome's ``code`` is None when the content may be written,
-    else ``render_invalid``, ``quality_review_failed`` or
+    ``existing_skill`` is the formatted existing skill for the generation
+    call and ``existing_skill_text`` the same for the reviewer (both None
+    for a new skill). The outcome's ``code`` is None when the content may
+    be written, else ``generation_invalid``, ``quality_review_failed`` or
     ``insufficient_context_budget`` (the last before any call).
     """
     selections = select_plan_evidence(candidates, evidence, budget_chars=evidence_budget_chars)
     short = [
-        f"candidate {c.candidate_id}: required evidence {s.missing_required} does not fit the render budget"
+        f"candidate {c.candidate_id}: required evidence {s.missing_required} does not fit the evidence budget"
         for c, s in zip(candidates, selections)
         if not s.usable
     ]
     if short:
-        return _failed(INSUFFICIENT_CONTEXT_BUDGET, short, rendered=None, review=None, calls=0)
+        return _failed(INSUFFICIENT_CONTEXT_BUDGET, short, generated=None, review=None, calls=0)
     fragments = _quoted_fragments(candidates, selections)
     if not fragments:
-        errors = ["no evidence fragment fits the render budget; nothing to render or review against"]
-        return _failed(INSUFFICIENT_CONTEXT_BUDGET, errors, rendered=None, review=None, calls=0)
+        errors = ["no evidence fragment fits the evidence budget; nothing to generate from or review against"]
+        return _failed(INSUFFICIENT_CONTEXT_BUDGET, errors, generated=None, review=None, calls=0)
 
-    rendered = await render_skill_md(
+    generated = await generate_skill_md(
         candidates,
         llm=llm,
-        template=render_template,
-        policy_text=render_policy,
+        template=generation_template,
+        policy_text=generation_policy,
         existing_skill=existing_skill,
         expected_name=expected_name,
         taken_names=taken_names,
@@ -424,13 +427,15 @@ async def render_and_review(
         required_prefix=required_prefix,
         evidence_budget_chars=evidence_budget_chars,
     )
-    calls = rendered.calls
-    if not rendered.ok:
-        return _failed(RENDER_INVALID, list(rendered.validation.errors), rendered=rendered, review=None, calls=calls)
+    calls = generated.calls
+    if not generated.ok:
+        return _failed(
+            GENERATION_INVALID, list(generated.validation.errors), generated=generated, review=None, calls=calls
+        )
 
     try:
         first = await review_skill_md(
-            rendered.content,
+            generated.content,
             candidates,
             fragments,
             existing_skill_text,
@@ -441,22 +446,22 @@ async def render_and_review(
     except ReviewContractError as exc:
         calls += exc.calls
         return _failed(
-            QUALITY_REVIEW_FAILED, [f"reviewer reply invalid: {exc}"], rendered=rendered, review=None, calls=calls
+            QUALITY_REVIEW_FAILED, [f"reviewer reply invalid: {exc}"], generated=generated, review=None, calls=calls
         )
     calls += first.calls
     if first.verdict == "pass":
-        return RenderedSkill(
-            content=rendered.content,
-            validation=rendered.validation,
+        return GeneratedSkill(
+            content=generated.content,
+            validation=generated.validation,
             review=first,
-            render_evidence=dict(rendered.render_evidence),
-            render_evidence_omitted=dict(rendered.render_evidence_omitted),
+            generation_evidence=dict(generated.generation_evidence),
+            generation_evidence_omitted=dict(generated.generation_evidence_omitted),
             calls=calls,
         )
 
     logger.warning("review: SKILL.md failed the quality review, correcting once: %s", first.issue_lines())
     revised = await revise_skill_md(
-        rendered,
+        generated,
         first.issue_lines(),
         llm=llm,
         expected_name=expected_name,
@@ -468,7 +473,7 @@ async def render_and_review(
     if not revised.ok:
         errors = [f"corrective SKILL.md invalid: {error}" for error in revised.validation.errors]
         return _failed(
-            QUALITY_REVIEW_FAILED, errors, rendered=revised, review=first, calls=calls, initial_issues=initial
+            QUALITY_REVIEW_FAILED, errors, generated=revised, review=first, calls=calls, initial_issues=initial
         )
     try:
         second = await review_skill_md(
@@ -485,24 +490,24 @@ async def render_and_review(
         calls += exc.calls
         errors = [f"reviewer reply invalid: {exc}"]
         return _failed(
-            QUALITY_REVIEW_FAILED, errors, rendered=revised, review=first, calls=calls, initial_issues=initial
+            QUALITY_REVIEW_FAILED, errors, generated=revised, review=first, calls=calls, initial_issues=initial
         )
     calls += second.calls
     if second.verdict == "fail":
         return _failed(
             QUALITY_REVIEW_FAILED,
             second.issue_lines(),
-            rendered=revised,
+            generated=revised,
             review=second,
             calls=calls,
             initial_issues=initial,
         )
-    return RenderedSkill(
+    return GeneratedSkill(
         content=revised.content,
         validation=revised.validation,
         review=second,
-        render_evidence=dict(revised.render_evidence),
-        render_evidence_omitted=dict(revised.render_evidence_omitted),
+        generation_evidence=dict(revised.generation_evidence),
+        generation_evidence_omitted=dict(revised.generation_evidence_omitted),
         calls=calls,
         corrected=True,
         initial_issues=first.issue_lines(),

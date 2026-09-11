@@ -30,6 +30,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.types import Overwrite
 from openai import APIConnectionError
 from rich.console import Console
+from rich.text import Text
 
 from msagent.agents.context import RetryNotice
 from msagent.cli.dispatchers import messages as message_module
@@ -436,6 +437,26 @@ def test_render_retry_notice_uses_warning_output_without_live(
     )
 
     assert printed == ["LLM 重试 1/3，2s 后重试"]
+
+
+def test_render_retry_notice_in_live_marks_by_color_only(tmp_path: Path) -> None:
+    session = _build_session(tmp_path)
+    dispatcher = MessageDispatcher(session)
+    printed: list[Text] = []
+    live = SimpleNamespace(console=SimpleNamespace(print=printed.append))
+    notice = RetryNotice(
+        notice_id="llm:1",
+        scope="llm",
+        attempt=1,
+        max_retries=3,
+        delay=2.0,
+    )
+
+    dispatcher._render_retry_notice(notice, live=live)
+
+    expected = dispatcher._format_retry_notice_text(notice)
+    assert [text.plain for text in printed] == [expected]
+    assert printed[0].style == "warning"
 
 
 def test_extract_tool_call_previews_merges_same_tool_with_conflicting_source_ids(

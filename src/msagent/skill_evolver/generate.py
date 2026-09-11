@@ -16,15 +16,15 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""LLM rendering of planned candidates into validated SKILL.md files.
+"""LLM generation of validated SKILL.md files from planned candidates.
 
-:func:`plan_render` splits the candidates the classify stage kept into render
-plans: one per new skill, one per library skill being updated; every named
-target is resolved against the library once, and a candidate whose target is
-unknown or ambiguous gets a rejection code, never a new plan.
-:func:`render_skill_md` turns one plan into a ``SKILL.md``: the model receives
-its candidates (and, for an update, the text of the existing skill) and
-answers with the complete file. The reply is checked by
+:func:`plan_generation` splits the candidates the classify stage kept into
+generation plans: one per new skill, one per library skill being updated;
+every named target is resolved against the library once, and a candidate
+whose target is unknown or ambiguous gets a rejection code, never a new plan.
+:func:`generate_skill_md` turns one plan into a ``SKILL.md``: the model
+receives its candidates (and, for an update, the text of the existing skill)
+and answers with the complete file. The reply is checked by
 :mod:`msagent.skill_evolver.validator`; on failure the model gets exactly one
 corrective turn listing every error, and a second failure is handed back to
 the caller, who writes nothing. :func:`revise_skill_md` is the single
@@ -36,10 +36,10 @@ given; under ``budget_chars`` the required fragments of all candidates are
 placed first and the optional ones after, so a shortage drops context before
 proof. A required fragment that does not fit makes the plan unusable
 (:class:`InsufficientContextBudget`, raised before any LLM call); the
-selection is recorded in provenance as ``render_evidence`` /
-``render_evidence_omitted``, so an incomplete set is never marked complete.
-The ``{render_policy}`` placeholder is mandatory: the policy text is inserted
-here with the same one-pass regex as the other placeholders.
+selection is recorded in provenance as ``generation_evidence`` /
+``generation_evidence_omitted``, so an incomplete set is never marked
+complete. The ``{generation_policy}`` placeholder is mandatory: the policy
+text is inserted here with the same one-pass regex as the other placeholders.
 
 The LLM is duck-typed exactly as in :mod:`msagent.skill_evolver.classify`.
 Stdlib + pydantic; this module never writes files.
@@ -69,22 +69,22 @@ logger = logging.getLogger(__name__)
 
 CANDIDATES_PLACEHOLDER = "{candidates}"
 EXISTING_SKILL_PLACEHOLDER = "{existing_skill}"
-RENDER_POLICY_PLACEHOLDER = "{render_policy}"
+GENERATION_POLICY_PLACEHOLDER = "{generation_policy}"
 # Text of the "Existing skill" section when the proposal is a new skill.
 NO_EXISTING_SKILL = "None. Create a new skill."
-# Rejection codes of plan_render: the candidate names no library skill, or a
-# bare name that exists in several categories.
+# Rejection codes of plan_generation: the candidate names no library skill, or
+# a bare name that exists in several categories.
 INVALID_TARGET = "invalid_target"
 AMBIGUOUS_TARGET = "ambiguous_target"
-# Code rejection of a plan whose required evidence does not fit the render budget.
+# Code rejection of a plan whose required evidence does not fit the evidence budget.
 INSUFFICIENT_CONTEXT_BUDGET = "insufficient_context_budget"
 # Characters one quoted evidence line costs beyond its text ("   - " + newline).
 EVIDENCE_LINE_OVERHEAD = 6
 
 # One pass over the template, so a placeholder-looking string inside a rule
 # or inside the existing skill text is never substituted.
-_PLACEHOLDER_RE = re.compile(r"\{(candidates|existing_skill|render_policy)\}")
-_PLACEHOLDERS = (CANDIDATES_PLACEHOLDER, EXISTING_SKILL_PLACEHOLDER, RENDER_POLICY_PLACEHOLDER)
+_PLACEHOLDER_RE = re.compile(r"\{(candidates|existing_skill|generation_policy)\}")
+_PLACEHOLDERS = (CANDIDATES_PLACEHOLDER, EXISTING_SKILL_PLACEHOLDER, GENERATION_POLICY_PLACEHOLDER)
 _CORRECTION = (
     "Your previous reply is not a valid SKILL.md:\n{errors}\n\n"
     "Reply again with the complete corrected SKILL.md: frontmatter and every "
@@ -99,18 +99,18 @@ _REVIEW_CORRECTION = (
 
 
 @dataclass(frozen=True, slots=True)
-class RenderResult:
-    """The last reply, its validation, the calls spent and what the renderer was quoted."""
+class GenerationResult:
+    """The last reply, its validation, the calls spent and what the generation call was quoted."""
 
     content: str
     validation: ValidationResult
-    # 1 or 2 for render_skill_md, 1 for revise_skill_md.
+    # 1 or 2 for generate_skill_md, 1 for revise_skill_md.
     calls: int
     # The whole conversation of the last attempt, the final ("ai", content) turn included.
     transcript: list[tuple[str, str]]
     # candidate_id -> fragment ids quoted / dropped for the budget.
-    render_evidence: dict[str, list[str]]
-    render_evidence_omitted: dict[str, list[str]]
+    generation_evidence: dict[str, list[str]]
+    generation_evidence_omitted: dict[str, list[str]]
 
     @property
     def ok(self) -> bool:
@@ -119,7 +119,7 @@ class RenderResult:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceSelection:
-    """The fragments quoted to the renderer for one candidate, and what was left out."""
+    """The fragments quoted to the generation call for one candidate, and what was left out."""
 
     # Required first, then optional, each in citation order.
     fragments: list[ShownFragment]
@@ -142,21 +142,21 @@ class EvidenceSelection:
 
 
 class InsufficientContextBudget(ValueError):
-    """Required render evidence of a candidate does not fit ``budget_chars``."""
+    """Required generation evidence of a candidate does not fit ``budget_chars``."""
 
     def __init__(self, candidate_id: str, missing: list[str], budget_chars: int) -> None:
         self.candidate_id = candidate_id
         self.missing = list(missing)
         self.budget_chars = budget_chars
         super().__init__(
-            f"render: required evidence {self.missing} of candidate {candidate_id!r} does not fit the render "
+            f"generate: required evidence {self.missing} of candidate {candidate_id!r} does not fit the evidence "
             f"budget ({budget_chars} chars)"
         )
 
 
 @dataclass(frozen=True, slots=True)
-class RenderPlan:
-    """One render call: its candidates and the library skill they revise."""
+class GenerationPlan:
+    """One generation call: its candidates and the library skill they revise."""
 
     # Classification order; one candidate for a create, every kept update of
     # ``existing`` otherwise.
@@ -184,14 +184,16 @@ class PlanRejection:
 
 
 @dataclass(frozen=True, slots=True)
-class RenderPlans:
-    """What plan_render decided for one thread; every candidate is in exactly one list."""
+class GenerationPlans:
+    """What plan_generation decided for one thread; every candidate is in exactly one list."""
 
-    # Plans to render, ordered by the first appearance of their first candidate.
-    plans: list[RenderPlan]
+    # Plans to generate a SKILL.md for, ordered by the first appearance of
+    # their first candidate.
+    plans: list[GenerationPlan]
     # Plans past ``max_plans`` with the reason; content and target untouched.
-    deferred: list[tuple[RenderPlan, str]]
-    # ``reference`` candidates naming a library skill: reported, never rendered.
+    deferred: list[tuple[GenerationPlan, str]]
+    # ``reference`` candidates naming a library skill: reported; no SKILL.md
+    # is generated for them.
     references: list[tuple[Candidate, Skill]]
     # Update/reference candidates whose target is unknown or ambiguous.
     rejected: list[PlanRejection]
@@ -222,21 +224,21 @@ def _rejection_detail(code: str, wanted: str) -> str:
     return f"existing_skill '{wanted}' is not in the skill library"
 
 
-def plan_render(
+def plan_generation(
     candidates: Sequence[Candidate],
     skills: Sequence[Skill],
     *,
     max_plans: int,
-) -> RenderPlans:
-    """Split the kept candidates into render plans; resolve every named target once.
+) -> GenerationPlans:
+    """Split the kept candidates into generation plans; resolve every named target once.
 
     Each ``create`` is its own plan (no merging), every ``update`` of one
     library skill shares a plan, and ``reference`` candidates are checked
-    with the same resolver and reported, never rendered. A target must name
-    a library skill (display name, or a bare name that is unique across
-    categories); otherwise the candidate is rejected with a warning and
-    never turned into a ``create``. Plans beyond ``max_plans`` are deferred,
-    not rendered.
+    with the same resolver and reported; no SKILL.md is generated for them.
+    A target must name a library skill (display name, or a bare name that is
+    unique across categories); otherwise the candidate is rejected with a
+    warning and never turned into a ``create``. Plans beyond ``max_plans``
+    are deferred; nothing is generated for them.
     """
     by_display = {skill.display_name: skill for skill in skills}
     by_name: dict[str, Skill | None] = {}
@@ -256,7 +258,7 @@ def plan_render(
         if isinstance(resolved, str):
             detail = _rejection_detail(resolved, wanted)
             logger.warning(
-                "render: dropped candidate %r: %s",
+                "generate: dropped candidate %r: %s",
                 candidate.title,
                 detail,
             )
@@ -272,12 +274,12 @@ def plan_render(
             group = updates[resolved.display_name] = []
             groups.append((resolved, group))
         group.append(candidate)
-    ordered = [RenderPlan(candidates=list(group), existing=skill) for skill, group in groups]
+    ordered = [GenerationPlan(candidates=list(group), existing=skill) for skill, group in groups]
     reason = f"max_plans {max_plans} reached"
     deferred = [(plan, reason) for plan in ordered[max_plans:]]
     for plan, _ in deferred:
-        logger.warning("render: deferred plan %s: %s", plan.label, reason)
-    return RenderPlans(
+        logger.warning("generate: deferred plan %s: %s", plan.label, reason)
+    return GenerationPlans(
         plans=ordered[:max_plans],
         deferred=deferred,
         references=references,
@@ -348,7 +350,7 @@ def select_plan_evidence(
     ]
 
 
-def select_render_evidence(
+def select_generation_evidence(
     candidate: Candidate,
     evidence: Mapping[str, ShownFragment],
     *,
@@ -428,7 +430,7 @@ async def _ask(llm: Any, payload: list[tuple[str, str]]) -> tuple[str, str]:
     return raw, _clean(raw)
 
 
-async def render_skill_md(
+async def generate_skill_md(
     candidates: Sequence[Candidate],
     *,
     llm: Any,
@@ -440,41 +442,41 @@ async def render_skill_md(
     evidence: Mapping[str, ShownFragment] | None = None,
     required_prefix: str | None = None,
     evidence_budget_chars: int | None = None,
-) -> RenderResult:
+) -> GenerationResult:
     """Ask the LLM for a SKILL.md, validate it, correct once, return the last try.
 
-    ``policy_text`` fills ``{render_policy}``. ``existing_skill`` is the
+    ``policy_text`` fills ``{generation_policy}``. ``existing_skill`` is the
     formatted text of the skill being updated and ``expected_name`` its name
     (both or neither). ``taken_names`` are library names a new skill must not
     reuse; ``required_prefix`` (new skills only) must start its name.
     ``evidence`` is the bundle's registry of shown fragments; each candidate
-    is rendered with its own selection (:func:`select_plan_evidence` under
+    is formatted with its own selection (:func:`select_plan_evidence` under
     ``evidence_budget_chars``). Raises ``ValueError`` before any LLM call when
-    there is nothing to render, the template lacks a placeholder or the
+    there is nothing to generate from, the template lacks a placeholder or the
     update arguments disagree, and :class:`InsufficientContextBudget` when a
     required fragment does not fit. Whether the content may be written is
     ``result.validation.ok``.
     """
     if not candidates:
-        raise ValueError("render: no candidates to render")
+        raise ValueError("generate: no candidates to generate from")
     missing = [p for p in _PLACEHOLDERS if p not in template]
     if missing:
-        raise ValueError(f"render: template has no {missing} placeholder")
+        raise ValueError(f"generate: template has no {missing} placeholder")
     if (existing_skill is None) != (expected_name is None):
-        raise ValueError("render: existing_skill and expected_name go together")
+        raise ValueError("generate: existing_skill and expected_name go together")
     if required_prefix is not None and expected_name is not None:
-        raise ValueError("render: required_prefix applies to new skills only")
+        raise ValueError("generate: required_prefix applies to new skills only")
     selections = select_plan_evidence(candidates, evidence or {}, budget_chars=evidence_budget_chars)
     for candidate, selection in zip(candidates, selections):
         if not selection.usable:
             raise InsufficientContextBudget(candidate.candidate_id, selection.missing_required, evidence_budget_chars)
-    render_evidence = {c.candidate_id: s.ids for c, s in zip(candidates, selections)}
-    render_evidence_omitted = {c.candidate_id: list(s.omitted) for c, s in zip(candidates, selections)}
+    generation_evidence = {c.candidate_id: s.ids for c, s in zip(candidates, selections)}
+    generation_evidence_omitted = {c.candidate_id: list(s.omitted) for c, s in zip(candidates, selections)}
 
     values = {
         "candidates": format_candidates(candidates, evidence, selections=selections),
         "existing_skill": existing_skill or NO_EXISTING_SKILL,
-        "render_policy": policy_text,
+        "generation_policy": policy_text,
     }
     instruction = _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)
     payload: list[tuple[str, str]] = [("human", instruction)]
@@ -486,16 +488,16 @@ async def render_skill_md(
         required_prefix=required_prefix,
     )
     if result.ok:
-        return RenderResult(
+        return GenerationResult(
             content,
             result,
             1,
             [*payload, ("ai", content)],
-            render_evidence,
-            render_evidence_omitted,
+            generation_evidence,
+            generation_evidence_omitted,
         )
 
-    logger.warning("render: invalid SKILL.md, retrying once: %s", result.errors)
+    logger.warning("generate: invalid SKILL.md, retrying once: %s", result.errors)
     bullets = "\n".join(f"- {error[:ERROR_TEXT_LIMIT]}" for error in result.errors)
     payload = [
         *payload,
@@ -509,29 +511,29 @@ async def render_skill_md(
         taken_names=taken_names,
         required_prefix=required_prefix,
     )
-    return RenderResult(
+    return GenerationResult(
         content,
         result,
         2,
         [*payload, ("ai", content or EMPTY_REPLY)],
-        render_evidence,
-        render_evidence_omitted,
+        generation_evidence,
+        generation_evidence_omitted,
     )
 
 
 async def revise_skill_md(
-    previous: RenderResult,
+    previous: GenerationResult,
     issues: Sequence[str],
     *,
     llm: Any,
     expected_name: str | None = None,
     taken_names: Collection[str] = (),
     required_prefix: str | None = None,
-) -> RenderResult:
+) -> GenerationResult:
     """The single corrective turn after a failed semantic review: one call, validated once.
 
     The reviewer's ``issues`` are appended to ``previous.transcript``; the
-    evidence selection is the one ``previous`` was rendered with.
+    evidence selection is the one ``previous`` was generated with.
     """
     bullets = "\n".join(f"- {issue[:ERROR_TEXT_LIMIT]}" for issue in issues)
     payload = [*previous.transcript, ("human", _REVIEW_CORRECTION.format(issues=bullets))]
@@ -542,11 +544,11 @@ async def revise_skill_md(
         taken_names=taken_names,
         required_prefix=required_prefix,
     )
-    return RenderResult(
+    return GenerationResult(
         content,
         result,
         1,
         [*payload, ("ai", content or EMPTY_REPLY)],
-        dict(previous.render_evidence),
-        dict(previous.render_evidence_omitted),
+        dict(previous.generation_evidence),
+        dict(previous.generation_evidence_omitted),
     )

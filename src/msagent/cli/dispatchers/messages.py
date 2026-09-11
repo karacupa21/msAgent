@@ -638,10 +638,7 @@ class MessageDispatcher:
         if notice.phase != "scheduled":
             return
 
-        text = Text()
-        text.append("⚠︎", style="warning")
-        text.append(" ")
-        text.append(cls._format_retry_notice_text(notice), style="warning")
+        text = Text(cls._format_retry_notice_text(notice), style="warning")
 
         if live is not None:
             live.console.print(text)

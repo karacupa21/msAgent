@@ -20,7 +20,8 @@
 
 A read-only wrapper around ``trajectory_recorder.export``: ``list`` renders
 the summaries of every recorded thread, ``show`` renders one thread as
-markdown. Nothing is written and no LLM is involved.
+markdown. Nothing is written and no LLM is involved. In the shared store
+(``output.scope: shared``) both see only the threads of this workspace.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from msagent.trajectory_recorder.export import (
     list_trajectories,
     render_markdown,
     resolve_trajectories_dir,
+    workspace_filter,
 )
 from msagent.trajectory_recorder.reader import iter_events
 from msagent.utils.time import format_relative_time
@@ -122,12 +124,29 @@ class TrajectoriesHandler:
         state_dir = initializer.get_project_paths(Path(ctx.working_dir)).root
         return resolve_trajectories_dir(state_dir=state_dir)
 
+    def _workspace(self) -> Path | None:
+        """This workspace when the store is shared by all of them, else ``None``."""
+        return workspace_filter(Path(self.session.context.working_dir))
+
+    @staticmethod
+    def _where(directory: Path, workspace: Path | None) -> str:
+        """Where the lookup happened, naming the workspace in the shared store."""
+        if workspace is None:
+            return f"in {directory}"
+        return f"in {directory} for workspace {workspace}"
+
     async def _list(self) -> None:
         """Print one row per recorded thread, newest first."""
         directory = self._trajectories_dir()
-        summaries = await asyncio.to_thread(list_trajectories, directory)
+        workspace = self._workspace()
+        summaries = await asyncio.to_thread(
+            list_trajectories,
+            directory,
+            workspace=workspace,
+        )
         if not summaries:
-            console.print_info(f"No trajectories recorded in {directory}")
+            where = self._where(directory, workspace)
+            console.print_info(f"No trajectories recorded {where}")
             console.print("")
             return
         console.console.print(build_summary_table(summaries))
@@ -143,12 +162,13 @@ class TrajectoriesHandler:
 
         thread_id = args[0].strip()
         directory = self._trajectories_dir()
-        path = find_trajectory_file(directory, thread_id)
+        workspace = self._workspace()
+        path = find_trajectory_file(directory, thread_id, workspace=workspace)
         if path is None:
             message = " ".join(
                 (
                     f"No recorded trajectory for thread '{thread_id}'",
-                    f"in {directory};",
+                    f"{self._where(directory, workspace)};",
                     "give a full id or a unique prefix",
                 ),
             )

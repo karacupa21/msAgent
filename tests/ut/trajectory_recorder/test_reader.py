@@ -562,6 +562,75 @@ def test_load_trajectories_edge_cases(tmp_path: Path) -> None:
         load_trajectories(directory, agent="Profiler")
 
 
+# ------------------------------------------------------- workspace filter
+
+
+def _attached(directory: Path, thread_id: str, working_dir: str | None, *, mtime: int) -> Path:
+    """A complete one-turn file whose recorder.attach records ``working_dir``."""
+    attach = {} if working_dir is None else {"working_dir": working_dir}
+    path = _write(
+        directory / f"Tester_{thread_id}.jsonl",
+        _line(1, "recorder.attach", thread_id=thread_id, **attach),
+        _line(2, "turn.start", thread_id=thread_id, run_id="run-1", source="dispatch"),
+        _line(3, "turn.end", thread_id=thread_id, run_id="run-1", status="completed"),
+    )
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_workspace_key_is_canonical_and_absolute_only(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    assert reader.workspace_key(work) == os.path.normcase(str(work.resolve()))
+    assert reader.workspace_key(f"{work}/../work") == reader.workspace_key(str(work))
+    assert reader.workspace_key("work") is None
+    assert reader.workspace_key("") is None
+
+
+def test_load_trajectories_filters_by_workspace(tmp_path: Path) -> None:
+    mine, other = tmp_path / "mine", tmp_path / "other"
+    directory = tmp_path / "store"
+    directory.mkdir()
+    base = 1_700_000_000
+    _attached(directory, "t-new", str(mine), mtime=base + 40)
+    _attached(directory, "t-other", str(other), mtime=base + 30)
+    _attached(directory, "t-old", str(mine), mtime=base + 20)
+    _attached(directory, "t-relative", "mine", mtime=base + 10)
+    _attached(directory, "t-unknown", None, mtime=base)
+
+    loaded = load_trajectories(directory, workspace=mine)
+    assert [trajectory.thread_id for trajectory in loaded] == ["t-new", "t-old"]
+    # limit keeps the newest of the workspace, not of the whole store.
+    newest = load_trajectories(directory, workspace=mine, limit=1)
+    assert [trajectory.thread_id for trajectory in newest] == ["t-new"]
+    theirs = load_trajectories(directory, workspace=other, agent="Tester")
+    assert [trajectory.thread_id for trajectory in theirs] == ["t-other"]
+    assert len(load_trajectories(directory)) == 5
+    with pytest.raises(ValueError, match="absolute"):
+        load_trajectories(directory, workspace=Path("mine"))
+
+
+def test_export_lookups_filter_by_workspace(tmp_path: Path) -> None:
+    mine, other = tmp_path / "mine", tmp_path / "other"
+    directory = tmp_path / "store"
+    directory.mkdir()
+    own = _attached(directory, "thread-mine", str(mine), mtime=1_700_000_020)
+    _attached(directory, "thread-other", str(other), mtime=1_700_000_010)
+    empty = directory / "Tester_thread-empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+
+    assert reader.file_workspace(own) == reader.workspace_key(mine)
+    assert reader.file_workspace(empty) is None
+    assert export.summarize_file(own).working_dir == str(mine)
+    # A file with no event belongs to no workspace instead of failing the listing.
+    listed = export.list_trajectories(directory, workspace=mine)
+    assert [summary.path for summary in listed] == [own]
+    assert export.find_trajectory_file(directory, "thread-other", workspace=mine) is None
+    # "thread-" is ambiguous in the store but unique within the workspace.
+    assert export.find_trajectory_file(directory, "thread-") is None
+    assert export.find_trajectory_file(directory, "thread-", workspace=mine) == own
+
+
 # ------------------------------------------------------- export / isolation
 
 

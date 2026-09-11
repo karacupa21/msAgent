@@ -47,7 +47,7 @@ from msagent.skill_evolver.features import extract_episodes
 from msagent.skill_evolver.policy import (
     DEMO_WORKFLOW_BLOCK,
     STRICT_KNOWLEDGE_BLOCK,
-    render_policy_block,
+    generation_policy_block,
     review_policy_block,
 )
 from msagent.skills.factory import Skill
@@ -65,7 +65,7 @@ SIGNALS_AGENT = "Profiler"
 NO_EPISODES = f"Nothing to save: no episodes detected in thread {DEMO_THREAD_ID}"
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -380,7 +380,7 @@ def _session(working_dir: Path, agent: str) -> SimpleNamespace:
 
 
 async def _fake_stage_prompt(_self, _root, _cfg, stage):
-    templates = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+    templates = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
     return templates[stage], f"packaged/{stage}/prompt_v2.md"
 
 
@@ -451,7 +451,7 @@ def _classify_reply(episode_id: str, *candidates: dict[str, Any]) -> str:
 
 
 def _demo_replies(pipeline: _Pipeline, skill: str = DEMO_SKILL, **overrides: Any) -> tuple[str, str, str]:
-    """classify (citing the real fragment ids of the fixture's chain), render, review."""
+    """classify (citing the real fragment ids of the fixture's chain), generate, review."""
     episode_id, refs = pipeline.observed()
     return _classify_reply(episode_id, _candidate(refs, **overrides)), skill, REVIEW_PASS
 
@@ -499,12 +499,12 @@ async def test_demo_fixture_reaches_a_valid_demo_proposal(pipeline: _Pipeline, t
     assert sorted(p.name for p in (tmp_path / "skills").iterdir()) == [".proposals"]
 
     provenance = _provenance(proposal)
-    assert provenance["provenance_version"] == 4 and provenance["demo"] is True
+    assert provenance["provenance_version"] == 5 and provenance["demo"] is True
     assert provenance["policy"] == {"requested": "reusable_workflow", "selection": "demo_workflow", "source": "config"}
     assert provenance["target"] == {"action": "create", "existing_skill": None, "existing_path": None}
     assert provenance["verification"] == {"level": "evidence_supported", "note": "not executed by generator"}
     assert provenance["quality_review"]["verdict"] == "pass" and provenance["quality_review"]["corrected"] is False
-    assert set(provenance["prompt_hashes"]) == {"classify", "render", "review"}
+    assert set(provenance["prompt_hashes"]) == {"classify", "generate", "review"}
     assert all(
         value.startswith("sha256:") and len(value) == len("sha256:") + 64
         for value in provenance["prompt_hashes"].values()
@@ -587,8 +587,8 @@ async def test_demo_with_strict_knowledge_has_no_contradictory_instructions(pipe
     assert "# Selection policy: demo_workflow" in classify and DEMO_WORKFLOW_BLOCK in classify
     assert "# Selection policy: strict_knowledge" not in classify and STRICT_KNOWLEDGE_BLOCK not in classify
     assert "non-obvious" not in classify and "{selection_policy}" not in classify
-    render = pipeline.instruction(1)
-    assert render_policy_block(True) in render and render_policy_block(False) not in render
+    generation = pipeline.instruction(1)
+    assert generation_policy_block(True) in generation and generation_policy_block(False) not in generation
     review = pipeline.instruction(2)
     assert review_policy_block(True) in review and review_policy_block(False) not in review
     provenance = _provenance(pipeline.proposal())
@@ -735,12 +735,12 @@ async def test_demo_duplicate_of_active_skill_creates_separate_demo_proposal(
 
     assert pipeline.spy.error == [] and pipeline.spy.warning == []
     assert "- csv-column-sum: Use when a CSV column has to be summed." in pipeline.instruction(0)
-    render = pipeline.instruction(1)
+    generation = pipeline.instruction(1)
     assert (
         "Covered by library skill: csv-column-sum (write a separate teaching skill; do not copy the library text)"
-        in render
+        in generation
     )
-    assert "old body" not in render
+    assert "old body" not in generation
     proposal = pipeline.proposal(DEMO_SKILL_NAME)
     assert proposal.is_file()
     provenance = _provenance(proposal)
@@ -768,7 +768,7 @@ async def test_demo_classify_reply_with_update_is_a_contract_error_not_a_swap(
 
     await pipeline.handler.handle([])
 
-    # One corrective retry, then the diagnosed contract error; the render stage is never reached.
+    # One corrective retry, then the diagnosed contract error; the generation stage is never reached.
     assert len(pipeline.llm.payloads) == 2 and len(pipeline.llm.replies) == 2
     correction = pipeline.llm.payloads[1][-1][1]
     assert "target.action 'update' is not allowed in demo mode" in correction
@@ -823,7 +823,7 @@ async def test_llm_budget_exhausted_writes_nothing(pipeline: _Pipeline, tmp_path
 
     await pipeline.handler.handle([])
 
-    # classify (1) and render (2); the quality review is refused, so nothing is written.
+    # classify (1) and generate (2); the quality review is refused, so nothing is written.
     assert len(pipeline.llm.payloads) == 2 and pipeline.llm.replies == [REVIEW_PASS]
     (error,) = [line for line in pipeline.spy.error if line.startswith("plan ")]
     assert "LLM call budget exhausted (2/2 calls per thread); SKILL.md not written" in error
@@ -840,7 +840,13 @@ async def test_llm_budget_exhausted_writes_nothing(pipeline: _Pipeline, tmp_path
         "note": "transport retries not counted",
     }
     assert [row["code"] for row in report["code_rejections"]] == ["budget_exhausted"]
-    assert report["plans"] == {"rendered": 1, "proposals": 0, "render_errors": 1, "rejected_targets": 0, "deferred": 0}
+    assert report["plans"] == {
+        "generated": 1,
+        "proposals": 0,
+        "generation_errors": 1,
+        "rejected_targets": 0,
+        "deferred": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -849,7 +855,7 @@ async def test_secret_in_trajectory_never_reaches_the_package(pipeline: _Pipelin
     pipeline.install(_with_secret(_events()))
     episode_id, refs = pipeline.observed()
     classify = _classify_reply(episode_id, _candidate(refs))
-    # A leaky render echoes the token twice (first try and the validator's corrective turn).
+    # A leaky SKILL.md reply echoes the token twice (first try and the validator's corrective turn).
     pipeline.script(*((classify, LEAKY_SKILL, LEAKY_SKILL) if leaky else (classify, DEMO_SKILL, REVIEW_PASS)))
 
     await pipeline.handler.handle([])

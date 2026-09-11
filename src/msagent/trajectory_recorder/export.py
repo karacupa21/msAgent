@@ -21,9 +21,12 @@
 Standalone by design (stdlib + msagent.core.paths only, no langchain), usable
 both as a library and as a CLI:
 
-    python -m msagent.trajectory_recorder.export list [--working-dir DIR]
+    python -m msagent.trajectory_recorder.export list [-w DIR] [--all-workspaces]
     python -m msagent.trajectory_recorder.export show --thread <id> [--max-chars N]
     python -m msagent.trajectory_recorder.export export --thread <id> --format json|jsonl|md [--output FILE]
+
+In the shared store (``output.scope: shared``) every command sees the threads
+recorded in ``--working-dir`` (default: cwd); ``--all-workspaces`` lifts that.
 """
 
 from __future__ import annotations
@@ -35,34 +38,79 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from msagent.trajectory_recorder.config import load_trajectory_config
-from msagent.trajectory_recorder.reader import extract_message_text, iter_events
+from msagent.trajectory_recorder.config import load_trajectory_config, store_dir
+from msagent.trajectory_recorder.reader import (
+    extract_message_text,
+    file_workspace,
+    iter_events,
+    workspace_key,
+)
 
 
 def resolve_trajectories_dir(*, working_dir: Path | None = None, state_dir: Path | None = None) -> Path:
-    """Locate the trajectories directory for a project."""
-    config = load_trajectory_config()
-    directory = Path(config.output.directory).expanduser()
-    if directory.is_absolute():
-        return directory
+    """Locate the trajectories directory for a project.
 
-    if state_dir is None:
+    The shared scope has one directory for every workspace and ignores both
+    arguments; per-workspace readers narrow it with :func:`workspace_filter`.
+    """
+    config = load_trajectory_config()
+    if state_dir is None and not config.is_shared:
         from msagent.core.paths import AppPaths
 
         state_dir = AppPaths.resolve().for_project(working_dir or Path.cwd()).root
-    return Path(state_dir) / directory
+    return store_dir(config, state_dir=state_dir)
 
 
-def find_trajectory_file(trajectories_dir: Path, thread_id: str) -> Path | None:
-    """Find the trajectory file for a thread id (or an unambiguous prefix)."""
+def workspace_filter(working_dir: Path | None = None) -> Path | None:
+    """The workspace a per-workspace reader narrows the store to.
+
+    ``None`` in the workspace scope, whose directory already is the workspace;
+    the resolved ``working_dir`` (default: cwd) in the shared scope.
+    """
+    if not load_trajectory_config().is_shared:
+        return None
+    return Path(working_dir or Path.cwd()).expanduser().resolve()
+
+
+def _workspace_id(workspace: Path | None) -> str | None:
+    """:func:`workspace_key` of a filter argument, which must be an absolute path."""
+    if workspace is None:
+        return None
+    key = workspace_key(workspace)
+    if key is None:
+        raise ValueError(f"workspace filter must be an absolute path, got {workspace}")
+    return key
+
+
+def _in_workspace(paths: list[Path], workspace: str | None) -> list[Path]:
+    """The files recorded in ``workspace`` (a workspace key); all of them when None."""
+    if workspace is None:
+        return paths
+    return [path for path in paths if file_workspace(path) == workspace]
+
+
+def find_trajectory_file(
+    trajectories_dir: Path,
+    thread_id: str,
+    *,
+    workspace: Path | None = None,
+) -> Path | None:
+    """Find the trajectory file for a thread id (or an unambiguous prefix).
+
+    With ``workspace`` only the files recorded in that workspace take part, so a
+    prefix has to be unique within it.
+    """
     if not trajectories_dir.is_dir():
         return None
-    exact = sorted(trajectories_dir.glob(f"*_{thread_id}.jsonl")) or sorted(
-        trajectories_dir.glob(f"{thread_id}.jsonl")
-    )
+    key = _workspace_id(workspace)
+
+    def matches(pattern: str) -> list[Path]:
+        return _in_workspace(sorted(trajectories_dir.glob(pattern)), key)
+
+    exact = matches(f"*_{thread_id}.jsonl") or matches(f"{thread_id}.jsonl")
     if exact:
         return exact[0]
-    prefixed = sorted(trajectories_dir.glob(f"*_{thread_id}*.jsonl"))
+    prefixed = matches(f"*_{thread_id}*.jsonl")
     return prefixed[0] if len(prefixed) == 1 else None
 
 
@@ -75,11 +123,14 @@ class TrajectorySummary:
     turns: int
     first_user_message: str
     size_bytes: int
+    # working_dir of the first recorder.attach; "" when the file has none.
+    working_dir: str = ""
 
 
 def summarize_file(path: Path) -> TrajectorySummary:
     thread_id = ""
     agent = ""
+    working_dir = ""
     events = 0
     turns = 0
     first_user_message = ""
@@ -87,6 +138,8 @@ def summarize_file(path: Path) -> TrajectorySummary:
         events += 1
         thread_id = thread_id or str(event.get("thread_id", ""))
         agent = agent or str(event.get("agent", ""))
+        if event.get("event") == "recorder.attach" and not working_dir:
+            working_dir = str(event.get("working_dir") or "")
         if event.get("event") == "turn.start":
             turns += 1
             if not first_user_message:
@@ -99,14 +152,21 @@ def summarize_file(path: Path) -> TrajectorySummary:
         turns=turns,
         first_user_message=first_user_message.replace("\n", " ")[:80],
         size_bytes=path.stat().st_size,
+        working_dir=working_dir,
     )
 
 
-def list_trajectories(trajectories_dir: Path) -> list[TrajectorySummary]:
+def list_trajectories(
+    trajectories_dir: Path,
+    *,
+    workspace: Path | None = None,
+) -> list[TrajectorySummary]:
+    """The directory's trajectories, newest first; ``workspace`` narrows them."""
     if not trajectories_dir.is_dir():
         return []
     files = sorted(trajectories_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return [summarize_file(path) for path in files]
+    own = _in_workspace(files, _workspace_id(workspace))
+    return [summarize_file(path) for path in own]
 
 
 # --------------------------------------------------------------- rendering
@@ -192,33 +252,47 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="msagent.trajectory_recorder.export", description="Inspect recorded trajectories")
     parser.add_argument("command", choices=["list", "show", "export"])
     parser.add_argument("-w", "--working-dir", default=None, help="Project working directory (default: cwd)")
-    parser.add_argument("--state-dir", default=None, help="Explicit project state dir (overrides --working-dir)")
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Project state dir (overrides --working-dir; unused by the shared store)",
+    )
+    parser.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help="Shared store: read every workspace, not only --working-dir",
+    )
     parser.add_argument("-t", "--thread", default=None, help="Thread id (or unique prefix) for show/export")
     parser.add_argument("-f", "--format", choices=["md", "json", "jsonl"], default="md")
     parser.add_argument("-o", "--output", default=None, help="Output file ('-' or omitted = stdout)")
     parser.add_argument("--max-chars", type=int, default=2000, help="Per-field clip in md output, 0 = no clipping")
     args = parser.parse_args(argv)
 
+    working_dir = Path(args.working_dir) if args.working_dir else None
     trajectories_dir = resolve_trajectories_dir(
-        working_dir=Path(args.working_dir) if args.working_dir else None,
+        working_dir=working_dir,
         state_dir=Path(args.state_dir) if args.state_dir else None,
     )
+    workspace = None if args.all_workspaces else workspace_filter(working_dir)
 
     if args.command == "list":
-        summaries = list_trajectories(trajectories_dir)
+        summaries = list_trajectories(trajectories_dir, workspace=workspace)
         if not summaries:
             print(f"No trajectories found in {trajectories_dir}")
             return 0
         for summary in summaries:
-            print(
+            line = (
                 f"{summary.thread_id}  agent={summary.agent}  turns={summary.turns}  "
-                f"events={summary.events}  size={summary.size_bytes / 1024:.1f}KB  | {summary.first_user_message}"
+                f"events={summary.events}  size={summary.size_bytes / 1024:.1f}KB"
             )
+            if args.all_workspaces:
+                line = f"{line}  workspace={summary.working_dir or '?'}"
+            print(f"{line}  | {summary.first_user_message}")
         return 0
 
     if not args.thread:
         parser.error(f"--thread is required for '{args.command}'")
-    path = find_trajectory_file(trajectories_dir, args.thread)
+    path = find_trajectory_file(trajectories_dir, args.thread, workspace=workspace)
     if path is None:
         print(f"No trajectory found for thread '{args.thread}' in {trajectories_dir}", file=sys.stderr)
         return 1

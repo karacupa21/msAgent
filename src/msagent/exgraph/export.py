@@ -138,7 +138,10 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     call ``select_trajectories`` and does not change that function.
     """
     from msagent.skill_evolver.direct_skill_generation import CROSS_SESSION_LIMIT
-    from msagent.trajectory_recorder.export import resolve_trajectories_dir
+    from msagent.trajectory_recorder.export import (
+        resolve_trajectories_dir,
+        workspace_filter,
+    )
     from msagent.trajectory_recorder.reader import load_trajectories
     from msagent.exgraph.workspace import rebuild_overlay
 
@@ -149,7 +152,13 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     working = Path(args.working_dir) if args.working_dir else None
     state = Path(args.state_dir) if args.state_dir else None
     trajectories_dir = resolve_trajectories_dir(working_dir=working, state_dir=state)
-    pool = load_trajectories(trajectories_dir, limit=CROSS_SESSION_LIMIT)
+    # The shared trajectory store holds every workspace; the pool stays this one's.
+    workspace = workspace_filter(working)
+    pool = load_trajectories(
+        trajectories_dir,
+        workspace=workspace,
+        limit=CROSS_SESSION_LIMIT,
+    )
     if not pool:
         print(f"No trajectories in {trajectories_dir}", file=sys.stderr)
         return 1

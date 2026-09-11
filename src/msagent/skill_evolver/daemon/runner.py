@@ -64,7 +64,14 @@ from msagent.skill_evolver.daemon.config import (
     daemon_state_dir,
     load_daemon_config,
 )
-from msagent.skill_evolver.daemon.discovery import Candidate, ProjectRef, ScanResult, discover_projects, iter_scans
+from msagent.skill_evolver.daemon.discovery import (
+    Candidate,
+    ProjectRef,
+    ScanResult,
+    discover_projects,
+    iter_scans,
+    iter_shared_scans,
+)
 from msagent.skill_evolver.daemon.ledger import (
     STATUS_FAILED,
     STATUS_GATE_SKIP,
@@ -82,6 +89,11 @@ from msagent.skill_evolver.mining import SkillMiningHandler, mine_stats
 from msagent.skill_evolver.pipeline import LazyLlm, RunContext, ThreadInput, load_prompts, record_gate_refusal
 from msagent.skill_evolver.report import decisions_dir
 from msagent.skill_evolver.writer import batch_dir_name
+from msagent.trajectory_recorder.config import load_trajectory_config
+from msagent.trajectory_recorder.export import (
+    resolve_trajectories_dir,
+    workspace_filter,
+)
 from msagent.trajectory_recorder.reader import (
     Trajectory,
     TrajectoryReadError,
@@ -133,7 +145,7 @@ class TickResult:
         line = (
             f"Tick over {self.projects} projects: {self.threads} threads, {self.proposals} proposals,"
             f" {self.gate_skips} skipped by the gate, {self.nothing} nothing to save,"
-            f" {self.rejected} rejected at render, {self.failures} failed"
+            f" {self.rejected} rejected at generation, {self.failures} failed"
         )
         if self.stopped_by_budget:
             line = f"{line}; stopped by the LLM budget"
@@ -170,7 +182,7 @@ def _fingerprint(rules: EffectiveRules, prompts: Any) -> str:
         {
             "features_version": FEATURES_VERSION,
             "classify": prompts.classify.sha256,
-            "render": prompts.render.sha256,
+            "generate": prompts.generate.sha256,
             "review": prompts.review.sha256,
             "rules": sorted(rules.as_record().items()),
         }
@@ -191,7 +203,7 @@ def _status_of(tally: Any) -> str:
 def _latest_report(report_dir: Path | None, thread_id: str, *, since: float) -> dict[str, Any] | None:
     """The decision report this run just wrote for ``thread_id``, if it wrote one.
 
-    The report is the pipeline's own contract (REPORT_VERSION 1); reading it back is
+    The report is the pipeline's own contract (REPORT_VERSION 2); reading it back is
     how the daemon learns the real LLM cost and the proposal paths without changing a
     line of the pipeline.
     """
@@ -216,14 +228,22 @@ def _pool_and_targets(
     candidates: list[Candidate],
     *,
     cross_session_limit: int,
+    workspace: Path | None = None,
 ) -> tuple[list[Trajectory], list[Trajectory]]:
     """The agent's cross-session pool plus the selected targets, each parsed once.
 
     Same construction as ``mining.select_trajectories``: repeated procedures keep
     their support because the pool is the agent's newest ``cross_session_limit``
     trajectories, and a target already in the pool is reused rather than re-read.
+    In the shared store ``workspace`` keeps the pool to the targets' own workspace,
+    so a background verdict matches /skill-mine run in that workspace.
     """
-    pool = load_trajectories(trajectories_dir, agent=agent, limit=cross_session_limit)
+    pool = load_trajectories(
+        trajectories_dir,
+        agent=agent,
+        workspace=workspace,
+        limit=cross_session_limit,
+    )
     by_path = {trajectory.path: trajectory for trajectory in pool}
     targets = [by_path.get(candidate.path) or load_trajectory(candidate.path) for candidate in candidates]
     return pool, targets
@@ -249,6 +269,9 @@ async def run_once(
     config = load_daemon_config(force_reload=True)
     if not config.is_active:
         return TickResult(status=STATUS_DISABLED)
+    # Where the trajectories live is the recorder's call: a --watch process must see a
+    # scope change without a restart, like the daemon config above.
+    load_trajectory_config(force_reload=True)
 
     state = daemon_state_dir()
 
@@ -291,7 +314,12 @@ async def _run_projects(
     budget = _Budget(remaining=config.schedule.max_llm_calls_per_tick)
     remaining_threads = config.schedule.max_threads_per_tick
 
-    for scan in iter_scans(projects, config, now=now):
+    if load_trajectory_config().is_shared:
+        # One directory serves every project: scan it once, give each file its origin.
+        scans = iter_shared_scans(resolve_trajectories_dir(), projects, config, now=now)
+    else:
+        scans = iter_scans(projects, config, now=now)
+    for scan in scans:
         result.projects += 1
         for path, reason in scan.skipped:
             logger.info("skill-daemon: skipping %s (%s)", path, reason)
@@ -426,6 +454,7 @@ async def _run_agent(
         agent,
         [item for item, _ in wanted],
         cross_session_limit=rules.cross_session_limit,
+        workspace=workspace_filter(project.working_dir),
     )
     stats = await asyncio.to_thread(mine_stats, targets, pool, skills, demo=rules.demo)
 

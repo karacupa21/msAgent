@@ -2,8 +2,8 @@
 
 Component: session-to-skill distillation (`/skill-mine`, `/direct-skill-generation`, `/skill-review`)
 Status: working draft; reflects branch `extract-session-history-generate-skill-md-and-other` as of
-2026-09-08 — config `schema_version` 2, prompt contract 2, `FEATURES_VERSION` 4, `PROVENANCE_VERSION` 4,
-decision report version 1.
+2026-09-08 — config `schema_version` 2, prompt contract 2, `FEATURES_VERSION` 4, `PROVENANCE_VERSION` 5,
+decision report version 2.
 
 ## 1. Purpose
 
@@ -20,7 +20,7 @@ lowers the novelty bar, never the evidence bar: every proposal, demo or not, pas
 evidence checks, the same validator, the same semantic review and the same secrets scan.
 
 The component follows the msAgent philosophy that domain expertise lives in prompts and
-skills, not in code: the classification, rendering and review methodology is a set of
+skills, not in code: the classification, generation and review methodology is a set of
 user-editable prompts plus one policy block per stage, the executable part is a thin, generic
 pipeline shared by both generating commands.
 
@@ -61,34 +61,34 @@ Component files:
 
 | File | Role |
 |---|---|
-| `src/msagent/skill_evolver/pipeline.py` | The **single implementation** of the per-thread stage sequence, `run_thread(RunContext, ThreadInput) -> ThreadResult` (section 7): both gates, bundle, context fit, classify v2, the `expand_context_once` round, `render_plan` (render → validate → semantic review → provenance v4 → proposal), the LLM call budget, the decision report; plus the run helpers both commands share (`print_policy_block`, `report_config_error`, `bundle_preview`, `gate_lines`, `load_prompts`, `LazyLlm`, `record_gate_refusal`). Never imports `mining` or `direct_skill_generation` |
+| `src/msagent/skill_evolver/pipeline.py` | The **single implementation** of the per-thread stage sequence, `run_thread(RunContext, ThreadInput) -> ThreadResult` (section 7): both gates, bundle, context fit, classify v2, the `expand_context_once` round, `generate_for_plan` (generate → validate → semantic review → provenance v5 → proposal), the LLM call budget, the decision report; plus the run helpers both commands share (`print_policy_block`, `report_config_error`, `bundle_preview`, `gate_lines`, `load_prompts`, `LazyLlm`, `record_gate_refusal`). Never imports `mining` or `direct_skill_generation` |
 | `src/msagent/skill_evolver/direct_skill_generation.py` | `DirectSkillGenerationHandler`: argument parsing (`parse_direct_args`, `DirectOptions`), config/prompt loading, `_gather_evidence`, dry run, one `run_thread` call; re-exports `STAGES`, `DirectSkillGenerationConfig`, `PlanContext`, `PlanOutcome`, `PlanTally` for the tests; the legacy session-replay helpers are kept but unused (section 8) |
 | `src/msagent/skill_evolver/mining.py` | `SkillMiningHandler`: the multi-thread `/skill-mine` command, `parse_mine_args`, thread selection, the dry-run tables and the per-thread loop over `run_thread` (section 17) |
 | `src/msagent/skill_evolver/config.py` | `config.skill.evolver.yml` schema_version 2: pydantic model `SkillEvolverConfig` (strict, `extra="forbid"`), the flat `DirectSkillGenerationConfig` view, `load_skill_evolver_config`, in-memory v1 migration, `SkillEvolverConfigError` with dotted paths, `apply_overrides`, `effective_rules` / `EffectiveRules`, `resolve_output_dir` / `output_root` (section 5). Imports only stdlib, `yaml`, `pydantic` and `msagent.core` path constants |
 | `src/msagent/skill_evolver/prompts.py` | Stage prompt resolution under prompt contract 2: `resolve_stage_prompt`, `PromptText`, `StagePrompts`, `prompt_sha256`, `declared_contract`, `REQUIRED_PLACEHOLDERS`, `PromptContractError` (section 6) |
-| `src/msagent/skill_evolver/policy.py` | The policy blocks inserted into the three prompts: `selection_policy_block(selection)` (classify), `render_policy_block(demo)`, `review_policy_block(demo)`, `DEMO_NAME_PREFIX = "demo-"` (section 18) |
+| `src/msagent/skill_evolver/policy.py` | The policy blocks inserted into the three prompts: `selection_policy_block(selection)` (classify), `generation_policy_block(demo)`, `review_policy_block(demo)`, `DEMO_NAME_PREFIX = "demo-"` (section 18) |
 | `src/msagent/skill_evolver/budget.py` | `CountingLlm` / `LlmBudgetExhausted` (the hard stop on `ainvoke` calls), `llm_call_bound`, `thread_call_ceiling`, `ContextBudget` (section 19) |
 | `src/msagent/skill_evolver/cli_args.py` | `take_shared_flag`, `SharedFlags`, `CliArgsError`, `POLICY_USAGE` — the four flags shared by both generating commands |
-| `src/msagent/skill_evolver/report.py` | The decision report: `decisions_dir`, `write_report` (atomic, private), `is_synthetic`, `REPORT_VERSION = 1` (section 20) |
+| `src/msagent/skill_evolver/report.py` | The decision report: `decisions_dir`, `write_report` (atomic, private), `is_synthetic`, `REPORT_VERSION = 2` (section 20) |
 | `src/msagent/skill_evolver/features.py` | Code-only candidate extraction over recorded trajectories: `Episode`, seven detectors (six scoring kinds plus the demo-only `observed_procedure`), `extract_episodes`, `mine_cross_session`, `classify_approval`, `group_incidents`, `evidence_score`, `gate_decision` (demo-aware), `expand_episode_context`, `REQUIRED_ROLES`, `has_required_evidence`, `DetectorNote`, `FEATURES_VERSION` (section 14) |
 | `src/msagent/skill_evolver/retrieval.py` | Stdlib BM25 over skill descriptions (`SkillDoc`, `BM25Index`) used by the `skill_gap` detector; Han runs are indexed as CJK bigrams |
 | `src/msagent/skill_evolver/bundle.py` | Evidence bundle with `E<n>` episode ids and `[evN]` fragment ids, demo ranking, `EXCLUDED_CODE` (section 15) |
 | `src/msagent/skill_evolver/classify.py` | Classify contract v2: `Decision` / `ReasonCode`, `ClassifyResult`, `Classification`, `_contract_violations`, one corrective retry, `ClassifyParseError` / `ClassifyContractError` (section 15) |
-| `src/msagent/skill_evolver/render.py` | Render stage: `plan_render`, budgeted `select_plan_evidence` / `EvidenceSelection`, `render_skill_md` with one corrective call, `revise_skill_md` (the single correction after a failed review), `resolve_library_skill` (section 16) |
-| `src/msagent/skill_evolver/review.py` | Semantic review: `review_skill_md`, `ReviewIssue` / `ReviewReply` / `ReviewResult`, and `render_and_review` — the per-plan stage both commands call, at most 6 LLM calls per plan (section 16) |
-| `src/msagent/skill_evolver/validator.py` | Code validation of a rendered `SKILL.md`: `validate_skill_md(..., required_prefix=)`, `ValidationResult`, `skill_name`, the secret patterns (`scan_secrets`, `redact_secrets`) (section 16) |
-| `src/msagent/skill_evolver/writer.py` | Proposal writer: `build_provenance` (v4), `scan_package`, `SecretsDetected`, `write_proposal` into `.proposals/` (section 16) |
+| `src/msagent/skill_evolver/generate.py` | Generation stage: `plan_generation`, budgeted `select_plan_evidence` / `EvidenceSelection`, `generate_skill_md` with one corrective call, `revise_skill_md` (the single correction after a failed review), `resolve_library_skill` (section 16) |
+| `src/msagent/skill_evolver/review.py` | Semantic review: `review_skill_md`, `ReviewIssue` / `ReviewReply` / `ReviewResult`, and `generate_and_review` — the per-plan stage both commands call, at most 6 LLM calls per plan (section 16) |
+| `src/msagent/skill_evolver/validator.py` | Code validation of a generated `SKILL.md`: `validate_skill_md(..., required_prefix=)`, `ValidationResult`, `skill_name`, the secret patterns (`scan_secrets`, `redact_secrets`) (section 16) |
+| `src/msagent/skill_evolver/writer.py` | Proposal writer: `build_provenance` (v5), `scan_package`, `SecretsDetected`, `write_proposal` into `.proposals/` (section 16) |
 | `src/msagent/skill_evolver/exgraph_context.py` | `attach_stored_graph`: the stored experience-graph appendix of the classify prompt (context, never citable) |
 | `src/msagent/cli/handlers/session_history.py` | Shared **read-only** access to persisted thread history: `load_history` (thread resolution, incl. `last`), `latest_other_thread`, `trim_history` |
 | `src/msagent/cli/handlers/trajectories.py` | `TrajectoriesHandler`: `/trajectories list` and `show` over `trajectory_recorder.export` (section 17) |
 | `src/msagent/cli/handlers/skill_review.py` | `SkillReviewHandler`: `/skill-review list` (with the `DEMO` column), `accept` (demo confirmation, `demo-` prefix re-checked) and `reject` over `.proposals/` (section 17.4) |
 | `resources/configs/default/config.skill.evolver.yml` | Packaged default component config, the commented schema_version 2 document (section 5) |
-| `resources/configs/default/skill-evolver/prompts/<stage>/prompt_v2.md` | Packaged stage prompts of contract 2 for `classify/`, `render/` and `review/`; `classify/prompt_v1.md` and `render/prompt_v1.md` stay in the package for the legacy prompt rule (section 6); `default/prompt_v1.md` is the legacy replay prompt |
+| `resources/configs/default/skill-evolver/prompts/<stage>/prompt_v2.md` | Packaged stage prompts of contract 2 for `classify/`, `generate/` and `review/`; `classify/prompt_v1.md` and `generate/prompt_v1.md` stay in the package for the legacy prompt rule (section 6); `default/prompt_v1.md` is the legacy replay prompt |
 | `tests/fixtures/trajectories/skill_evolver_signals.jsonl` | Hand-written trajectory exercising every per-trajectory scoring detector |
 | `tests/fixtures/trajectories/skill_evolver_demo_success.jsonl` | Synthetic thread `thread-demo-synthetic` (agent `SyntheticDemo`, working dir `/synthetic/demo`, header `"synthetic": true`): one `dispatch` turn, `read_file` → `bash` (sum) → `bash` (check → `TOTAL_OK`), no scoring episode at all, exactly one `observed_procedure` under demo (section 14) |
-| `tests/ut/skill_evolver/test_features.py`, `test_retrieval.py`, `test_bundle.py`, `test_classify.py`, `test_render.py`, `test_validator.py`, `test_writer.py`, `test_direct_skill_generation.py`, `test_exgraph_context.py` | Detector, retrieval, bundle, classify v2, render, validator, writer v4 and handler tests on scripted fake LLMs; no-langchain/no-network probes |
+| `tests/ut/skill_evolver/test_features.py`, `test_retrieval.py`, `test_bundle.py`, `test_classify.py`, `test_generate.py`, `test_validator.py`, `test_writer.py`, `test_direct_skill_generation.py`, `test_exgraph_context.py` | Detector, retrieval, bundle, classify v2, generation, validator, writer v5 and handler tests on scripted fake LLMs; no-langchain/no-network probes |
 | `tests/ut/skill_evolver/test_evolver_config.py`, `test_prompts.py`, `test_policy.py`, `test_budget.py`, `test_cli_args.py`, `test_review.py`, `test_pipeline.py`, `test_report.py` | Tests of the new modules (the config file is named `test_evolver_config.py`: a `test_config.py` basename collides with `tests/ut/exgraph/test_config.py` when both directories run in one pytest invocation); `test_pipeline.py` drives `run_thread` with scripted replies (budget stops, context fit, expand round, `nothing` causes, demo overlay on both gates, review correction, report in `finally`) |
-| `tests/ut/skill_evolver/test_demo_pipeline.py`, `test_demo_fixture_executable.py` | The demo fixture end to end on a scripted LLM (both commands, on/off, `on_nothing: stop`, duplicate of an active skill, secrets, exgraph on/off), and the executability of the fixture commands and of the rendered example in a whitelisted `python3 -c` sandbox (section 21) |
+| `tests/ut/skill_evolver/test_demo_pipeline.py`, `test_demo_fixture_executable.py` | The demo fixture end to end on a scripted LLM (both commands, on/off, `on_nothing: stop`, duplicate of an active skill, secrets, exgraph on/off), and the executability of the fixture commands and of the generated example in a whitelisted `python3 -c` sandbox (section 21) |
 | `tests/ut/cli/handlers/test_skill_mining.py`, `test_trajectories_handler.py` | Command tests: parsers (shared flags included), tables, the no-LLM dry run with overrides, the per-thread loop on a scripted LLM, `/skill-review` incl. the `DEMO` marker and the accept confirmation |
 
 Modified files (integration points):
@@ -114,7 +114,7 @@ Modified files (integration points):
         ├── classify/
         │   ├── prompt_v1.md            # contract 1 (kept for the legacy prompt rule, section 6)
         │   └── prompt_v2.md            # evidence → JSON decisions + candidates (section 15)
-        ├── render/
+        ├── generate/
         │   ├── prompt_v1.md            # contract 1 (kept for the legacy prompt rule)
         │   └── prompt_v2.md            # candidates → SKILL.md (section 16)
         ├── review/
@@ -133,13 +133,29 @@ branches, so upgrades of an existing home also receive new files. Mapping:
 
 Semantics: **copy-if-missing** — user edits are never overwritten; new files added in
 later builds do arrive, changed defaults for already-materialized files do not. Concretely,
-a home seeded by an earlier build receives `prompts/{classify,render}/prompt_v2.md` and the
-new `prompts/review/` folder automatically, while its `config.skill.evolver.yml` (flat v1) and
+a home seeded by an earlier build receives the files a later build adds (for example the
+`prompts/review/` folder) automatically, while its `config.skill.evolver.yml` (flat v1) and
 its `prompt_v1.md` copies stay as they are. Both cases are handled at run time, not at
 startup: a v1 config is migrated in memory (section 5), an untouched `prompt_v1.md` copy is
 bypassed in favour of the packaged `prompt_v2.md`, and a **customised** v1 prompt stops the
 run with a migration instruction before any LLM exists (section 6) — a stale methodology
-never runs silently. Failures of the seeding itself are logged as warnings and never abort
+never runs silently.
+
+The SKILL.md stage was renamed from `render` to `generate` (2026-09-11): the packaged folder
+is `prompts/generate/`, the config key `prompts.generate`, the placeholder
+`{generation_policy}`. A home seeded before the rename keeps `skill-evolver/prompts/render/`,
+which is **no longer read**; a schema_version 2 `config.skill.evolver.yml` seeded before the
+rename still names `prompts.render`, which stops the evolver commands with
+`prompts.render: unknown key` until it is renamed (a flat v1 config has no `prompts` section
+and is migrated in memory as before). An untouched `render/` copy can simply be deleted (the
+next start seeds `prompts/generate/`); a customised one must be ported by hand to
+`prompts/generate/` with `{render_policy}` replaced by `{generation_policy}` — left in
+`render/`, the customisation is silently not used. Prompt contract 2 now requires
+`{generation_policy}` for the generate stage and was deliberately not bumped: an old copy is
+never read from the new folder, and a ported copy that keeps the old placeholder fails with
+`lacks the {generation_policy} placeholder required by contract 2`.
+
+Failures of the seeding itself are logged as warnings and never abort
 startup. The `skill-evolver` home folder participates in the standard layout validation
 (regular directory, no symlink) via `_MANAGED_DIRECTORIES`.
 
@@ -169,7 +185,7 @@ dataclass defaults; the file is never written). The packaged document:
 | `generation.category` | `default` | text, `must be one directory name without separators, got 'a/b'` — recorded in provenance, never written to automatically |
 | `generation.output_dir` | `null` | text or null, `must be a non-empty path, got ''`; stored as written, `~` expanded and a relative path resolved against `working_dir` by `resolve_output_dir` / `output_root` (default `<working_dir>/skills`) |
 | `prompts.contract_version` | `2` | whole number, `must equal 2 (prompt contract of this build)` |
-| `prompts.classify`, `prompts.render`, `prompts.review` | `prompt_v2.md` | text, `must be a file name without path separators or '..', got '/etc/passwd'` — file inside `skill-evolver/prompts/<stage>/` (section 6) |
+| `prompts.classify`, `prompts.generate`, `prompts.review` | `prompt_v2.md` | text, `must be a file name without path separators or '..', got '/etc/passwd'` — file inside `skill-evolver/prompts/<stage>/` (section 6) |
 | `diagnostics.save_decision_report` | `true` | boolean — the decision report (section 20) |
 | `diagnostics.save_evidence_text` | `false` | boolean — additionally store the bundle text next to the report |
 | `diagnostics.save_rejected_drafts` | `true` | boolean — keep the last SKILL.md draft of every refused plan next to the decision report (section 20) |
@@ -237,7 +253,7 @@ so the two consumers can never disagree on where `.proposals/` lives.
 
 ## 6. Prompt resolution
 
-The evidence pipeline has three stages (`config.STAGES = ("classify", "render", "review")`) and
+The evidence pipeline has three stages (`config.STAGES = ("classify", "generate", "review")`) and
 one prompt file per stage, named explicitly by `prompts.<stage>` (default `prompt_v2.md`).
 `prompts.resolve_stage_prompt(user_root, cfg, stage, *, notes)` looks for
 `~/.msagent/skill-evolver/prompts/<stage>/<name>` first and the packaged
@@ -260,11 +276,11 @@ the first `HEADER_LINES` (5) lines; a file without the header is contract 1
 (`LEGACY_CONTRACT`). The declared contract must equal `prompts.contract_version`, and every
 placeholder of `REQUIRED_PLACEHOLDERS[stage]` must be present — `{skill_library}`,
 `{evidence_bundle}`, `{selection_policy}` for classify; `{candidates}`, `{existing_skill}`,
-`{render_policy}` for render; `{skill_md}`, `{candidates}`, `{evidence}`, `{existing_skill}`,
+`{generation_policy}` for generate; `{skill_md}`, `{candidates}`, `{evidence}`, `{existing_skill}`,
 `{review_policy}` for review. A violation is a `PromptContractError` that stops the command
 before any LLM exists (printed by `report_config_error`, section 5):
 `<path> declares contract_version 1 but prompts.contract_version is 2; Migrate: …` or
-`<path> lacks the {render_policy} placeholder required by contract 2`.
+`<path> lacks the {generation_policy} placeholder required by contract 2`.
 
 **Legacy `prompt_file` rule.** Only a v1 config (`legacy_format=True`) with
 `prompt_file: prompt_v1.md` triggers it: when the user's `prompts/<stage>/prompt_v1.md` is
@@ -301,10 +317,10 @@ inside the data are inert. The classify template receives `{skill_library}` (pro
 inventory of the loaded skills) and exactly one `{selection_policy}` block via `str.replace` in
 the pipeline — `run_thread` raises `ValueError("classify template has no {selection_policy}
 placeholder")` when the placeholder is absent, and `classify()` refuses a template that still
-contains either placeholder — and `{evidence_bundle}` inside `classify()`. The render template
-gets `{render_policy}`, `{candidates}` and `{existing_skill}`, the review template
+contains either placeholder — and `{evidence_bundle}` inside `classify()`. The generation template
+gets `{generation_policy}`, `{candidates}` and `{existing_skill}`, the review template
 `{review_policy}`, `{skill_md}`, `{candidates}`, `{evidence}` and `{existing_skill}`, each in one
-regex pass inside `render_skill_md` / `review_skill_md`. The legacy replay prompt keeps
+regex pass inside `generate_skill_md` / `review_skill_md`. The legacy replay prompt keeps
 `{agent}`, `{thread_id}`, `{working_dir}` and `{history}`.
 
 ## 7. Execution pipeline
@@ -323,7 +339,7 @@ through `run_thread`, the gate-refused ones through `record_gate_refusal`, secti
         │                       SkillEvolverConfigError / PromptContractError →
         │                       report_config_error (error lines + hint), stop; no LLM
         ▼
- load_prompts(_load_stage_prompt, root, cfg)   classify / render / review, contract 2,
+ load_prompts(_load_stage_prompt, root, cfg)   classify / generate / review, contract 2,
         │                       sha256 of each template (§6)
         ▼
  load_history() / select_trajectories()        read-only thread resolution; the JSONL via
@@ -390,16 +406,17 @@ through `run_thread`, the gate-refused ones through `record_gate_refusal`, secti
         │                       refs … (invalid_evidence)" | "… no durable learning   │
         │                       found in thread …" — stop                             │
         ▼                                                                             │
- plan_render(candidates, skills, max_plans)   (§16)                                   │
+ plan_generation(candidates, skills, max_plans)   (§16)                               │
         │                       reference → read_existing_skill; coverage text_read| │
         │                       unverified; note "reference <skill>: <title>          │
         │                       (classifier's claim; skill text read|unreadable,      │
         │                       coverage not verified)"; rejected/deferred reported   │
         ▼                                                                             │
- for each plan: render_plan()   llm.exhausted → "Deferred plan: … — llm call budget   │
-        │                       exhausted (U/L)"; render_and_review ≤ 6 calls (§16):  │
-        │                       render (≤2) → validate → review (≤2) → one revise →   │
-        │                       review; provenance v4 (§16) → write_proposal (secrets │
+ for each plan: generate_for_plan()  llm.exhausted →                                  │
+        │                       "Deferred plan: … — llm call budget exhausted (U/L)"; │
+        │                       generate_and_review ≤ 6 calls (§16): generate (≤2) →  │
+        │                       validate → review (≤2) → one revise →                 │
+        │                       review; provenance v5 (§16) → write_proposal (secrets │
         │                       scan of the whole package). Success: "Skill proposal  │
         │                       saved to …", activation hint, muted "Quality review:  │
         │                       passed[ after one correction]", "Verification:        │
@@ -520,7 +537,7 @@ revises); from then on the standard discovery path applies (`SkillFactory` scan 
   prompts, gather evidence and print summaries. A rule that exists once cannot drift between
   the commands.
 - **Direct LLM calls, no tools, a hard budget.** Classify (1 + 1 corrective), the optional
-  expand round (1 + 1), and per plan render (≤ 2) + review (≤ 2) + revise (1) + review (1):
+  expand round (1 + 1), and per plan generate (≤ 2) + review (≤ 2) + revise (1) + review (1):
   at most `2 + 2 + 6 × max_plans` calls per thread, capped by `max_llm_calls_per_thread`
   through `CountingLlm` (section 19). Deterministic cost and latency, no headless-interrupt
   handling; the library inventory is injected as a programmatic `{skill_library}` snapshot
@@ -530,7 +547,7 @@ revises); from then on the standard discovery path applies (`SkillFactory` scan 
   episode ids the bundle showed, and AI narration is never evidence.
 - **Policy as one inserted block, never in the fixed text.** The fixed prompt texts carry no
   selection criteria; the effective selection chooses exactly one `{selection_policy}` block,
-  the effective demo flag the `{render_policy}` / `{review_policy}` texts (section 18). A
+  the effective demo flag the `{generation_policy}` / `{review_policy}` texts (section 18). A
   prompt can therefore never demand non-obviousness and allow triviality at the same time
   (`test_policy.py::test_demo_assembly_has_no_novelty_requirement`).
 - **Demo lowers novelty, never evidence.** The overlay bypasses the score gate
@@ -538,7 +555,7 @@ revises); from then on the standard discovery path applies (`SkillFactory` scan 
   skill as a separate `demo-<task-class>` proposal; everything about evidence, structure,
   safety, secrets and budgets stays exactly as in an ordinary run, and the proposal is inactive
   like any other (section 18).
-- **Code decides what is a skill.** `validate_skill_md` rejects what the render prompt
+- **Code decides what is a skill.** `validate_skill_md` rejects what the generation prompt
   forbids; the semantic reviewer compares the file with the candidates and evidence; the model
   gets exactly one corrective turn per failure kind, and a second failure ends the plan with
   the error list instead of a repaired file.
@@ -585,7 +602,7 @@ revises); from then on the standard discovery path applies (`SkillFactory` scan 
   sentinel, `prompts/default/prompt_v1.md` and the `active` field are kept in the module but
   `handle()` no longer calls them (user decision, 2026-09-04: remove once the evidence
   pipeline has proven itself).
-- **One render per plan.** Every accepted candidate of a plan goes into one `SKILL.md`; the
+- **One SKILL.md per plan.** Every accepted candidate of a plan goes into one `SKILL.md`; the
   existing skill text is passed only for the `update` plan of one skill. Candidates past
   `max_plans_per_thread` are deferred, never merged.
 - **Validator gaps (deliberate, spec-literal):** deepagents' extra name rules (no trailing
@@ -859,8 +876,12 @@ bigrams instead of cutting the run, so `性能` survives inside `文件的性能
 
 Wiring (`_gather_evidence`, section 7): the thread's JSONL is located via
 `export.resolve_trajectories_dir(state_dir=initializer.get_project_paths(ctx.working_dir).root)`
-and `export.find_trajectory_file(dir, thread_id)`; **no file → `print_error` and return without
-calling the LLM** (a thread without a recorded trajectory is refused, not passed through).
+and `export.find_trajectory_file(dir, thread_id, workspace=export.workspace_filter(work))`; **no file →
+`print_error` and return without calling the LLM** (a thread without a recorded trajectory is refused,
+not passed through). Under the recorder's `output.scope: shared` that directory is the one store of
+every workspace, and `workspace_filter` narrows the lookup and the cross-session pool to this
+workspace's threads, as `/skill-mine` does (`select_trajectories(..., workspace=)`); under the default
+workspace scope it returns `None` and nothing changes.
 `pipeline.collect_episodes(current, others, *, skill_index, demo, notes)` runs
 `extract_episodes` on the current trajectory and `mine_cross_session([current, *others])` over
 the agent's newest `cross_session_limit` trajectories; with the current trajectory first in
@@ -874,7 +895,7 @@ demo=rules.demo)` decides: a decision that does not pass ends the thread with an
 naming the reason — `Nothing to save: no episodes detected in thread <id>`, or `Nothing to save:
 evidence score X < min_evidence_score Y (N episodes, K incidents)` followed by `; no episode has
 complete required evidence` under demo — and no LLM call; otherwise the episodes go to the
-bundle → classify stage (section 15) and the candidates to the render stage (section 16).
+bundle → classify stage (section 15) and the candidates to the generation stage (section 16).
 `exgraph/enrich.py` keeps calling `extract_episodes(trajectory)` without the flag and never
 sees `observed_procedure`.
 
@@ -1064,7 +1085,7 @@ import-isolation probe covers it. Post-processing is code, not prompt:
   provenance (`candidates_rejected`) and in the report as code rejections with the code
   `invalid_evidence`; never repaired. A rejected candidate is *not* a contract violation, so
   the other candidates survive;
-- kept candidates get `candidate_id` `c1`, `c2`, … in reply order (the join key of render,
+- kept candidates get `candidate_id` `c1`, `c2`, … in reply order (the join key of generation,
   review and provenance; titles can collide), their refs deduplicated in the model's order;
 - no candidates left → verdict `nothing` while `model_verdict` keeps what the model said, so
   the pipeline can tell `(invalid_evidence)` from the classifier's own `nothing`.
@@ -1084,7 +1105,7 @@ shown refs are a **strict superset** of the previous round's (`Insufficient evid
 classification round with N added events (K per side)`); otherwise it prints
 `expand_context_once: no new context could be shown; not retried`. The second bundle is
 re-gated and context-fitted like the first; a second `nothing` is final. `covered_by` is a
-plain library name the render stage resolves (`resolve_library_skill`) into the provenance
+plain library name the generation stage resolves (`resolve_library_skill`) into the provenance
 `covering_skill` record; when it names no skill the name is recorded with null path and hash
 and a warning is printed (`covered_by '<name>' names no library skill; recorded as the
 classifier's claim`).
@@ -1098,17 +1119,17 @@ cross-session blocks) and `test_classify.py` (scripted fake LLM: fences, retry, 
 violations, every contract violation with its one retry, rejection reasons, candidate ids,
 `covered_by`, optional conditions, guards, the v2 prompt contract, isolation).
 
-## 16. Render, validation, review and proposals
+## 16. Generation, validation, review and proposals
 
 The classify verdict is turned into a file by four small modules, all stdlib + pydantic (the
 import-isolation probe in `test_validator.py` covers them, `review` and `policy` included):
 
-**`render.py`** — `plan_render(candidates, skills, *, max_plans) -> RenderPlans(plans, deferred,
-references, rejected)` splits a thread's kept candidates into render plans and never changes a
-candidate's target: every `create` is its own `RenderPlan(candidates, existing=None)` (no semantic
-merging in this version), every `update` of one library skill shares a
-`RenderPlan(candidates, existing=<Skill>)`, updates of different skills are separate plans. `update`
-and `reference` targets go through one resolver (display name, or a bare name unique across
+**`generate.py`** — `plan_generation(candidates, skills, *, max_plans) -> GenerationPlans(plans,
+deferred, references, rejected)` splits a thread's kept candidates into generation plans and never
+changes a candidate's target: every `create` is its own `GenerationPlan(candidates, existing=None)`
+(no semantic merging in this version), every `update` of one library skill shares a
+`GenerationPlan(candidates, existing=<Skill>)`, updates of different skills are separate plans.
+`update` and `reference` targets go through one resolver (display name, or a bare name unique across
 categories): a valid `reference` lands in `references` (the pipeline reads the skill text and
 reports `reference <skill>: <title> (classifier's claim; skill text read|unreadable, coverage not
 verified)`, never "already covered"), an unknown or ambiguous target in `rejected` as
@@ -1123,37 +1144,38 @@ cited fragment when no budget is given; under `budget_chars` pass 1 places the *
 fragments of all candidates (citation order) and pass 2 the optional ones, each costing
 `len(text) + EVIDENCE_LINE_OVERHEAD` (6), so a shortage drops context before proof. An optional
 fragment that does not fit is `omitted`; a required one is `missing_required` and makes the
-plan unusable — `render_skill_md` raises `InsufficientContextBudget` and `render_and_review`
+plan unusable — `generate_skill_md` raises `InsufficientContextBudget` and `generate_and_review`
 returns the code `insufficient_context_budget` **before any LLM call** (also when the selection
-is empty). The selection is recorded in provenance as `render_evidence` /
-`render_evidence_omitted`, so an incomplete set is never marked complete.
+is empty). The selection is recorded in provenance as `generation_evidence` /
+`generation_evidence_omitted`, so an incomplete set is never marked complete.
 
-`render_skill_md(candidates, *, llm, template, policy_text, existing_skill=None,
+`generate_skill_md(candidates, *, llm, template, policy_text, existing_skill=None,
 expected_name=None, taken_names=(), evidence=None, required_prefix=None,
-evidence_budget_chars=None) -> RenderResult(content, validation, calls, transcript,
-render_evidence, render_evidence_omitted)` renders **one plan**: it fills `{render_policy}`
-(mandatory; `policy.render_policy_block(demo)`), `{candidates}` and `{existing_skill}` (formatted
-text or `None. Create a new skill.`) in one regex pass, calls the duck-typed LLM, strips
-`<think>` blocks and a whole-reply fence, normalises line endings and validates. On errors the
-model gets exactly one corrective turn (`("ai", bad reply)` + the error list); the result of the
-second attempt is returned as is. `revise_skill_md(previous, issues, *, llm, ...)` is the single
-corrective turn after a failed semantic review: it appends `_REVIEW_CORRECTION` with the
-reviewer's issues to `previous.transcript`, makes exactly one call and validates once.
+evidence_budget_chars=None) -> GenerationResult(content, validation, calls, transcript,
+generation_evidence, generation_evidence_omitted)` generates **one plan's** SKILL.md: it fills
+`{generation_policy}` (mandatory; `policy.generation_policy_block(demo)`), `{candidates}` and
+`{existing_skill}` (formatted text or `None. Create a new skill.`) in one regex pass, calls the
+duck-typed LLM, strips `<think>` blocks and a whole-reply fence, normalises line endings and
+validates. On errors the model gets exactly one corrective turn (`("ai", bad reply)` + the error
+list); the result of the second attempt is returned as is. `revise_skill_md(previous, issues, *,
+llm, ...)` is the single corrective turn after a failed semantic review: it appends
+`_REVIEW_CORRECTION` with the reviewer's issues to `previous.transcript`, makes exactly one call
+and validates once.
 
-`format_candidates(candidates, evidence, *, selections)` renders one numbered block per
+`format_candidates(candidates, evidence, *, selections)` formats one numbered block per
 candidate: the title and applicability, `Rule`, then — only when the classifier filled them —
 `When` (`applies_when`), `Constraints` (bullets) and `Expected outcome`, the `Target`, the line
 `Covered by library skill: <name> (write a separate teaching skill; do not copy the library
 text)` when `covered_by` is set, and `Evidence:` bullets with the **text** of every selected
 fragment plus `(N context excerpts omitted for the prompt budget)` when some were. Fragment
 ids, seqs and thread ids never enter the payload — they belong in provenance, and the reply is
-the user-facing SKILL.md. A candidate without conditions is rendered without them: nothing is
+the user-facing SKILL.md. A candidate without conditions is formatted without them: nothing is
 invented on the way to the file.
 
-**Prompt** `prompts/render/prompt_v2.md` (341 lines): the role plus how to read `Evidence` lines
+**Prompt** `prompts/generate/prompt_v2.md` (341 lines): the role plus how to read `Evidence` lines
 (`user:` the task, `tool.start <tool>: {…}` an action with its real arguments, `tool.result
 <tool> (ok): …` the observed result, `tool.error …` a failure, `ai: …` the agent's statement —
-not proof), the `# Selection policy` section holding `{render_policy}`, the task rules (revise
+not proof), the `# Selection policy` section holding `{generation_policy}`, the task rules (revise
 the existing skill and keep its name, or create a durable kebab-case name — the policy may
 prescribe a prefix; state `## Inputs` with their format and the prerequisites; concrete actions
 with the exact command shape, the expected result and how to verify it; **never claim that a
@@ -1190,19 +1212,19 @@ end)]` and `redact_secrets(text)` (span → `[REDACTED:<label>]`) are shared wit
 
 | Element | Behaviour |
 |---|---|
-| Inputs | `{review_policy}` (`policy.review_policy_block(demo)`), `{candidates}` (`format_review_candidates`: `[c1] <title> — target …`, Rule / When / Constraints / Expected outcome, `Cites: ev1, ev2`), `{evidence}` (`format_review_evidence`: `- [ev3] (required) …` / `- [ev4] (context) …` — exactly the fragments the renderer was quoted, ids shown, so the reviewer can cite them), `{existing_skill}` (the update's current text, or `None. Create a new skill.`), `{skill_md}` |
+| Inputs | `{review_policy}` (`policy.review_policy_block(demo)`), `{candidates}` (`format_review_candidates`: `[c1] <title> — target …`, Rule / When / Constraints / Expected outcome, `Cites: ev1, ev2`), `{evidence}` (`format_review_evidence`: `- [ev3] (required) …` / `- [ev4] (context) …` — exactly the fragments the generation call was quoted, ids shown, so the reviewer can cite them), `{existing_skill}` (the update's current text, or `None. Create a new skill.`), `{skill_md}` |
 | Reply | `ReviewReply(verdict: pass \| fail, issues: [ReviewIssue(code, detail, evidence_refs)])` — `pass` requires `issues: []`, `fail` at least one issue; strict JSON, one parse retry (`_CORRECTION`), then `ReviewContractError` |
 | Issue codes | `lost_condition` (a When/constraint/prerequisite/completion criterion missing or weakened), `order_changed` (step order differs where the evidence shows order matters), `command_mismatch` (command, argument, flag, path shape or result differs from the evidence), `unsupported_addition` (a command, flag, API, version, unit, dependency, step or guarantee not in candidates/evidence — **including a claimed test or verification not present in the evidence**), `missing_rule` (an accepted candidate not represented), `unsafe_claim` (a prohibition or safety statement without evidence), `one_time_value` (a one-time path/id/host/timestamp left in; durable conventions are fine), `name_policy` (the name violates the review policy: no `demo-` prefix, or not a new skill, under demo), `other` |
 | What a pass means | "faithful to the candidates and evidence" — not "executed", not "works everywhere"; the reviewer compares and never rewrites; triviality, style, length and library overlap are not issues (`REVIEW_POLICY_NORMAL`: *Judge fidelity, not value*) |
-| `review_skill_md(skill_md, candidates, fragments, existing_skill_text, *, llm, template, policy_text, corrective_retry=True) -> ReviewResult(verdict, issues, unknown_refs, calls)` | guards before any call (blank SKILL.md, no candidates, no fragments, missing placeholder); an issue citing an id the renderer never saw is kept and listed in `unknown_refs` with a warning, never dropped; `record()` is the JSON stored in provenance |
-| `render_and_review(candidates, *, llm, render_template, review_template, render_policy, review_policy, evidence, existing_skill=None, existing_skill_text=None, expected_name=None, taken_names=(), required_prefix=None, evidence_budget_chars=None) -> RenderedSkill` | the per-plan stage both commands call: selection (empty or missing required → `insufficient_context_budget`, 0 calls) → `render_skill_md` (≤ 2 calls; invalid twice → `render_invalid`) → `review_skill_md` (≤ 2 calls; unusable reply → `quality_review_failed` with `reviewer reply invalid: …`) → on `fail` **one** `revise_skill_md` (1 call; invalid → `quality_review_failed` with `corrective SKILL.md invalid: …`) → `review_skill_md(corrective_retry=False)` (1 call; `fail` or invalid → `quality_review_failed`). **At most 6 `ainvoke` per plan.** `RenderedSkill(content, validation, review, render_evidence, render_evidence_omitted, calls, code, errors, corrected, initial_issues, draft)`; `review_record()` = the final review plus `corrected` and `initial_issues` — the first review's findings whenever a corrective render ran, on the fail path too, so a refused plan's report shows both rounds → provenance `quality_review`; `draft` is the last SKILL.md text of a refused plan, kept by the decision report (section 20), never written as a proposal. `LlmBudgetExhausted` is not caught here |
+| `review_skill_md(skill_md, candidates, fragments, existing_skill_text, *, llm, template, policy_text, corrective_retry=True) -> ReviewResult(verdict, issues, unknown_refs, calls)` | guards before any call (blank SKILL.md, no candidates, no fragments, missing placeholder); an issue citing an id the generation call never saw is kept and listed in `unknown_refs` with a warning, never dropped; `record()` is the JSON stored in provenance |
+| `generate_and_review(candidates, *, llm, generation_template, review_template, generation_policy, review_policy, evidence, existing_skill=None, existing_skill_text=None, expected_name=None, taken_names=(), required_prefix=None, evidence_budget_chars=None) -> GeneratedSkill` | the per-plan stage both commands call: selection (empty or missing required → `insufficient_context_budget`, 0 calls) → `generate_skill_md` (≤ 2 calls; invalid twice → `generation_invalid`) → `review_skill_md` (≤ 2 calls; unusable reply → `quality_review_failed` with `reviewer reply invalid: …`) → on `fail` **one** `revise_skill_md` (1 call; invalid → `quality_review_failed` with `corrective SKILL.md invalid: …`) → `review_skill_md(corrective_retry=False)` (1 call; `fail` or invalid → `quality_review_failed`). **At most 6 `ainvoke` per plan.** `GeneratedSkill(content, validation, review, generation_evidence, generation_evidence_omitted, calls, code, errors, corrected, initial_issues, draft)`; `review_record()` = the final review plus `corrected` and `initial_issues` — the first review's findings whenever a corrective revision ran, on the fail path too, so a refused plan's report shows both rounds → provenance `quality_review`; `draft` is the last SKILL.md text of a refused plan, kept by the decision report (section 20), never written as a proposal. `LlmBudgetExhausted` is not caught here |
 | `VERIFICATION_EVIDENCE_SUPPORTED` | `{"level": "evidence_supported", "note": "not executed by generator"}` — the `verification` record of every proposal this stage passes |
 
 The pipeline prints the outcome per plan: `Quality review: passed` or `Quality review: passed
 after one correction`, `Verification: evidence_supported; not executed by generator`, and for
 refusals `plan <label>: quality review failed after one correction; nothing written:` followed
 by `  - <code>: <detail>` lines, `plan <label>: quality reviewer reply invalid; nothing written:
-…`, or `plan <label>: required evidence does not fit the render budget
+…`, or `plan <label>: required evidence does not fit the evidence budget
 (insufficient_context_budget); nothing written:`. A SKILL.md the validator refused twice keeps
 the historical `plan <label>: SKILL.md rejected after one correction; nothing written:` plus the
 error list.
@@ -1225,12 +1247,12 @@ the disk in clear (`[REDACTED:<label>]`).
 
 `build_provenance(*, thread_ids, bundle, candidates, rejected, sources, model, prompt_variants,
 category, target, policy, demo, config, versions, prompt_hashes, quality_review, verification,
-covering_skill=None, render_evidence=None, render_evidence_omitted=None, generated_at=None)`
-produces the **provenance v4** contract (`PROVENANCE_VERSION = 4`), scoped to the render plan
-the proposal came from:
+covering_skill=None, generation_evidence=None, generation_evidence_omitted=None, generated_at=None)`
+produces the **provenance v5** contract (`PROVENANCE_VERSION = 5`), scoped to the plan the
+proposal came from:
 
 ```json
-{"provenance_version": 4,
+{"provenance_version": 5,
  "thread_ids": ["<analysed thread>", "<threads a shared procedure relies on>"],
  "sources": {"<file name>": "<path of the trajectory>"},
  "episodes": [{"kind": "observed_procedure", "weight": 0.0, "thread_id": "...", "source": "<file name>",
@@ -1245,14 +1267,14 @@ the proposal came from:
                  "target": {"action": "create", "existing_skill": null}}],
  "candidates_rejected": [{"title": "...", "reason": "evidence not shown in the bundle: ['ev9']",
                           "evidence_refs": ["ev9"]}],
- "render_evidence": {"c1": ["ev1", "ev3"]},
- "render_evidence_omitted": {"c1": []},
+ "generation_evidence": {"c1": ["ev1", "ev3"]},
+ "generation_evidence_omitted": {"c1": []},
  "observed_procedure_source": [{"source": "<file name>", "line": 4, "seq": 4, "role": "step"}],
  "model": "<llm_config.model>",
- "prompt_variants": {"classify": "<resolved path>", "render": "<resolved path>", "review": "<resolved path>"},
- "prompt_hashes": {"classify": "sha256:<hex>", "render": "sha256:<hex>", "review": "sha256:<hex>"},
+ "prompt_variants": {"classify": "<resolved path>", "generate": "<resolved path>", "review": "<resolved path>"},
+ "prompt_hashes": {"classify": "sha256:<hex>", "generate": "sha256:<hex>", "review": "sha256:<hex>"},
  "features_version": 4,
- "versions": {"features": 4, "provenance": 4, "config_schema": 2, "prompts_contract": 2},
+ "versions": {"features": 4, "provenance": 5, "config_schema": 2, "prompts_contract": 2},
  "generated_at": "<ISO 8601, UTC>",
  "category": "<generation.category>",
  "target": {"action": "create | update", "existing_skill": "...", "existing_path": "...",
@@ -1274,18 +1296,21 @@ what this proposal **rests on** (`evidence_shown`: the fragments its candidates 
 what the classify model saw, id → file, physical line, seq, role and the redacted text;
 `observed_procedure_source`: the physical lines of every `observed_procedure` episode the plan
 cites, so a demo skill points back at the whole recorded chain), and what reached its
-**render** call (`candidates` are exactly the rendered plan, `render_evidence` /
-`render_evidence_omitted` the renderer's actual selection). The v4 keys make the *mode* of the
-run reproducible: `policy` (the requested policy, the effective selection and whether the CLI
-set it), `demo`, `config.requested` versus `config.effective` (section 5), `versions`,
-`prompt_hashes` (section 6), `quality_review` and `verification` (above), `covering_skill` (the
-library skill a demo proposal knowingly duplicates), and `target.base_sha256` (the exact file an
-update was written against). Guards: a demo proposal that is not a `create`, an update without
-`base_sha256`, an unknown `verification.level`, an incomplete `policy` or `prompt_hashes` record
-raise `ValueError` before anything is written.
+**generation** call (`candidates` are exactly the plan's candidates, `generation_evidence` /
+`generation_evidence_omitted` the generation call's actual selection). The v4 keys make the
+*mode* of the run reproducible: `policy` (the requested policy, the effective selection and
+whether the CLI set it), `demo`, `config.requested` versus `config.effective` (section 5),
+`versions`, `prompt_hashes` (section 6), `quality_review` and `verification` (above),
+`covering_skill` (the library skill a demo proposal knowingly duplicates), and
+`target.base_sha256` (the exact file an update was written against). Guards: a demo proposal
+that is not a `create`, an update without `base_sha256`, an unknown `verification.level`, an
+incomplete `policy` or `prompt_hashes` record raise `ValueError` before anything is written.
 
-Compatibility: **v3** proposals are scoped to the plan but lack the v4 keys; **v2** proposals
-hold every kept candidate of the thread and the whole registry; proposals written before that
+Compatibility: **v4** proposals, written before the SKILL.md stage was renamed from render to
+generate, carry `render_evidence` / `render_evidence_omitted` and the stage key `render` in
+`prompt_variants`, `prompt_hashes` and `config.requested.prompts` where v5 has the
+`generation_*` keys and `generate`; **v3** proposals are scoped to the plan but lack the v4
+keys; **v2** proposals hold every kept candidate of the thread and the whole registry; proposals written before that
 carry no `provenance_version` (**v1**): their `candidates[].evidence_refs` are seq numbers, their
 `episodes[]` rows have `evidence_seq` and there is no registry. `/skill-review` reads `category`,
 `thread_ids`, `generated_at` and `target`, which every version shares, plus `demo` and
@@ -1309,7 +1334,7 @@ Verification: `pytest tests/ut/skill_evolver -q` — validator positives and one
 (incl. `description: Instructions for debugging`, the one-step workflow passing, an
 evidence-backed `Never use --force` passing, every secret label, placeholder credentials
 passing), all-errors collection, writer layout/collisions/rejections/guards, the scanner
-guarantees, render happy path / one correction / double failure / update name enforcement /
+guarantees, generation happy path / one correction / double failure / update name enforcement /
 all required fragments beyond three / every missing required reported / refusal before the
 LLM under a small budget / guards, the review stage (unknown flag blocked then corrected, a
 lost constraint failing after one correction, the six-call ceiling, unknown refs kept), and
@@ -1374,19 +1399,19 @@ one report per thread. The header of each mined thread is
 `[i/n] thread <short id> — score S, N episodes, K incidents, <describe()>`. A run costs at most
 `llm_call_bound(threads, max_plans, max_llm_calls=, expand=)` LLM calls (section 19; printed as
 `Mining N threads (up to B LLM calls)`) and writes at most `max_plans_per_thread` proposals per
-thread. Plans are rendered, reviewed and written one by one: a plan that fails (twice invalid,
-review failed, secrets, budget, a transport error) is a render error of that plan and the next
+thread. Plans run one by one (generate, review, write): a plan that fails (twice invalid,
+review failed, secrets, budget, a transport error) is a generation error of that plan and the next
 plan still runs; an exception outside the plan loop (classify) fails the thread — printed as
 `thread <id>: <exc>`. Names a new skill may not reuse (`RunContext.taken`) are the library plus
 every create proposal written earlier in the run, across threads. The summary line keeps its
 shape — `Mined N threads: P proposals, G skipped by the gate, Z nothing to save, R rejected at
-render, F failed` — and every thread lands in exactly one of its categories: with a proposal (P
+generation, F failed` — and every thread lands in exactly one of its categories: with a proposal (P
 counts proposals, not threads), skipped by the gate, nothing to save (no plan ran), rejected at
-render (every plan of the thread was refused: invalid twice, review failed, secrets, budget,
+generation (every plan of the thread was refused: invalid twice, review failed, secrets, budget,
 transport) or failed (an exception outside the plans). The line is an error only when a thread
 failed, a warning when a plan was refused, a success when a proposal was written, else info;
-when anything besides clean proposals happened, a second line reports `Plans: R render
-errors, Q rejected targets, D deferred` (a warning under render errors), and a refused plan's
+when anything besides clean proposals happened, a second line reports `Plans: R generation
+errors, Q rejected targets, D deferred` (a warning under generation errors), and a refused plan's
 kept draft is named by `Rejected SKILL.md draft kept for inspection: <path>` (section 20). The
 pool is the agent's newest `cross_session_limit`
 (20) trajectories and each target goes **first** into `collect_episodes`, so the kept
@@ -1481,7 +1506,7 @@ reached. A full run adds the classify and plan lines the task specification list
 diagnostic example — `Decision E1: accept (accepted)`, `Candidate '<title>': accepted (trivial
 procedure allowed)`, `Skill proposal saved to …`, `Quality review: passed`, `Verification:
 evidence_supported; not executed by generator`, `Proposal: saved, inactive, DEMO` — and ends
-with the muted `Prompts: classify=<path>, render=<path>, review=<path>` line.
+with the muted `Prompts: classify=<path>, generate=<path>, review=<path>` line.
 
 Colour comes from column-level styles, never inline markup, and every data-derived cell and
 line is passed through `rich.markup.escape` or wrapped in `rich.text.Text`, so a tool named
@@ -1510,7 +1535,7 @@ Three tiers, which is how "the analyzer must fail loudly" and a usable multi-thr
   corrupt neighbouring file raises `TrajectoryReadError` naming itself, printed as `Trajectory
   unreadable (<exc>); the LLM was not called`.
 - Per-thread generation is guarded inside `run_thread` and around it: a plan failure is
-  printed with its label and counted as a render error, the loop continues with the next plan;
+  printed with its label and counted as a generation error, the loop continues with the next plan;
   a classify parse/contract error or any other exception fails the thread — printed with the
   thread id, the traceback logged, the id repeated in the summary, the summary switched to
   `print_error` — and the loop continues with the next thread, because aborting would discard
@@ -1520,7 +1545,7 @@ Three tiers, which is how "the analyzer must fail loudly" and a usable multi-thr
   tier.
 
 Every run ends on one fixed-shape line: threads mined, proposals, skipped by the gate, nothing to save,
-rejected at render, failed (section 17.1).
+rejected at generation, failed (section 17.1).
 
 ### 17.4 `/skill-review`
 
@@ -1573,7 +1598,7 @@ formatters (the `[n]` prefix always equals the true length), the tables (markup 
 literally, subtotals, the demo override reason), the dry run (no LLM, the zero-tool note, the
 three empty selections, `--thread`, `--threads`, the call bound, overrides changing nothing on
 disk), the real run on the `skill_evolver_signals.jsonl` fixture with a scripted LLM (one
-proposal written with its v4 provenance, `nothing` verdict, a failing thread reported while the
+proposal written with its v5 provenance, `nothing` verdict, a failing thread reported while the
 loop continues, the review and bound lines) and on the demo fixture (`--thread
 thread-demo-synthetic` with and without `--demo`), and `/skill-review` (list incl. the `DEMO`
 marker, accept, category, hand-broken SKILL.md, occupied destination, update refusal, ambiguity,
@@ -1587,7 +1612,7 @@ What deserves a candidate is decided by exactly one **policy block** per prompt 
 by code (`policy.py`); the fixed prompt texts carry the evidence standard and the output
 contract only. `classification.policy` (or `--policy`) names the ordinary policy; `demo_mode`
 (or `--demo` / `--no-demo`) is an overlay that replaces the classify block and switches the
-render and review texts. The **effective selection** (`EffectiveRules.selection`) is therefore
+generation and review texts. The **effective selection** (`EffectiveRules.selection`) is therefore
 one of three values, and `test_policy.py::test_every_classify_assembly_has_exactly_one_policy_heading`
 pins that every assembled classify prompt carries exactly one `# Selection policy: <selection>`
 heading.
@@ -1598,9 +1623,9 @@ heading.
 | `reusable_workflow` | `classification.policy: reusable_workflow` / `--policy reusable_workflow` | Save a useful, re-applicable **procedure**: its steps may be standard tools, the value may lie in their selection, order, branching, applicability conditions or completion criteria — a new technical discovery is not required. A bare list of tools without inputs, decision logic and a checked result is `routine_activity`; every kept step must be visible in the excerpts (arguments and results), a step whose result is missing, failed or only claimed is `insufficient_evidence`; a procedure the library already describes is `already_covered`; keep conditions, order and limits as observed, parameterise, state the observed completion criterion |
 | `demo_workflow` | `demo_mode: true` / `--demo`, on top of either policy | Demonstration mode: the rule does not have to be new, surprising or absent from the library; a trivial but confirmed procedure is a valid candidate, including one the library already covers. Accept an episode (typically `observed_procedure`) when the excerpts show the task context, the real arguments of each operation and its real, meaningful result (`accepted`). A covered procedure is still a **separate teaching candidate**: `target.action` must be `create`, `existing_skill` null, the covering skill named in `covered_by`; `update` / `reference` are never answered in this mode. **The evidence standard is unchanged**: an orphan call, a missing or failing result, `status: ok` without a meaningful output, an unconfirmed claim of success is `insufficient_evidence`; destructive or credential-exposing steps are `unsafe_procedure` |
 
-The render and review stages follow the effective demo flag, not the requested one:
-`render_policy_block(demo)` is `RENDER_POLICY_NORMAL` (*the candidates passed the evidence gate
-on their own merit; name a new skill after its task class*) or `RENDER_POLICY_DEMO` (*a
+The generation and review stages follow the effective demo flag, not the requested one:
+`generation_policy_block(demo)` is `GENERATION_POLICY_NORMAL` (*the candidates passed the evidence
+gate on their own merit; name a new skill after its task class*) or `GENERATION_POLICY_DEMO` (*a
 confirmed procedure that may be trivial or common knowledge; write it anyway as a teaching
 skill — concrete inputs with their format, the exact operation with its real argument shape,
 the observed result and how to check it, never generic advice; the name MUST start with `demo-`
@@ -1644,7 +1669,7 @@ names demo-<task-class>`. Precisely:
   contract violation, then a `ClassifyContractError`, never a silent swap);
 - code-side rejection of every candidate whose refs are empty or not shown (`invalid_evidence`);
 - name and path safety plus the `demo-` prefix with a task class after it, checked by the one
-  shared `validate_skill_md` (in the render correction loop, at write time and again at
+  shared `validate_skill_md` (in the generation correction loop, at write time and again at
   `/skill-review accept`); the `SKILL.md` structure rules of section 16;
 - the semantic review — faithfulness to candidates and evidence, no unsupported additions,
   no claimed test that did not run, prohibitions only when the evidence shows the failure —
@@ -1688,7 +1713,7 @@ The per-thread ceiling and the run bound:
 ```python
 CLASSIFY_CALLS = 2        # classify + one corrective retry
 EXPAND_CALLS = 2          # the expand_context_once round (same shape)
-PLAN_CALLS = 6            # render 2 (first + validator correction) + review 2 (first + parse retry)
+PLAN_CALLS = 6            # generate 2 (first + validator correction) + review 2 (first + parse retry)
                           # + revise 1 + review 1
 thread_call_ceiling(max_plans, *, expand) = CLASSIFY_CALLS + (EXPAND_CALLS if expand else 0) + PLAN_CALLS * max_plans
 llm_call_bound(threads, max_plans, *, max_llm_calls=16, expand=True) = threads * min(max_llm_calls, ceiling)
@@ -1720,8 +1745,8 @@ fits the bundle **once**: if `bundle.text` exceeds the room, the bundle is rebui
 the second gate apply again), unless the room is below `MIN_BUNDLE_CHARS` (500), in which case
 the thread stops with `Nothing to save: the classify prompt does not fit the model context
 (<describe()>); bundle needs N chars, R available` and the code rejection
-`insufficient_context_budget`. Before each plan, `render_plan` derives
-`evidence_budget_chars = room_for(max(render overhead, review overhead))` — the render and
+`insufficient_context_budget`. Before each plan, `generate_for_plan` derives
+`evidence_budget_chars = room_for(max(generation overhead, review overhead))` — the generation and
 review templates, their policy texts, the candidate blocks without evidence and the existing
 skill text — and `select_plan_evidence` places the required fragments first; the review
 payload additionally carries the SKILL.md itself, which the 2048-token reply reserve covers.
@@ -1753,7 +1778,7 @@ stringified rather than lost, and a failure to write the report is logged as a w
 failing the thread. `/skill-review accept` never reads, copies or moves anything from this
 folder: the reports stay where they are when a proposal is promoted.
 
-Payload keys (`REPORT_VERSION = 1`; `report_version`, `evidence_text_file` and
+Payload keys (`REPORT_VERSION = 2`; `report_version`, `evidence_text_file` and
 `rejected_draft_files` are stamped by `write_report`):
 
 | Key | Content |
@@ -1762,19 +1787,23 @@ Payload keys (`REPORT_VERSION = 1`; `report_version`, `evidence_text_file` and
 | `synthetic` | `is_synthetic(agent, working_dir)`: the agent name or a component of the working directory contains `synthetic` (case-insensitive) — the demo fixture's `SyntheticDemo` / `/synthetic/demo`; the header's `"synthetic": true` is not consulted |
 | `policy` | `{requested, selection, demo_mode, overrides[]}` |
 | `config` | `{requested: DirectSkillGenerationConfig.as_record(), effective: EffectiveRules.as_record()}` (section 5) |
-| `prompts` | `{contract_version, variants{classify, render, review}, hashes{… "sha256:<hex>"}}` (section 6) |
+| `prompts` | `{contract_version, variants{classify, generate, review}, hashes{… "sha256:<hex>"}}` (section 6) |
 | `episodes` | `{total, counts{kind: n}, detector_notes[{detector, reason, detail, seqs}]}` — the demo detector's drop reasons included |
 | `gate`, `second_gate` | `{score, min_evidence_score, passes, reason, detail, incidents}`; `second_gate` is `null` when nothing was excluded |
 | `bundles[]` | per bundle build (round 1, the context cut, the expand round): `{round, fragments, chars, max_chars, shown, trimmed, excluded, excluded_kinds}` |
 | `stages[]` | `{stage, status, detail}` in order: `gate pass\|skip`, `bundle ok\|stop`, `context_fit cut\|stop`, `classify save\|nothing\|failed`, `expand retried\|skipped`, `plan <label> written\|rejected\|deferred\|error`, `thread failed` |
 | `classifier` | `{verdict, candidates: n, decisions[Decision], rejected[{title, reason, evidence_refs}]}` — decisions and rejections of both rounds accumulate, verdict and count are the final round's |
-| `code_rejections[]` | `{code, subject, detail}` — `insufficient_context_budget` (per excluded episode / the thread / a plan), `invalid_evidence`, `parse_error`, `contract_error`, `invalid_target`, `ambiguous_target`, `render_invalid`, `quality_review_failed`, `budget_exhausted`, `secrets_detected`, `existing_skill_unreadable` |
-| `plans` | `{rendered, proposals, render_errors, rejected_targets, deferred}` |
-| `quality_review[]` | per reviewed plan: `{plan, verdict, issues, unknown_refs, calls, corrected, initial_issues}` — `initial_issues` holds the first review's findings whenever a corrective render ran, on the pass and on the fail path |
+| `code_rejections[]` | `{code, subject, detail}` — `insufficient_context_budget` (per excluded episode / the thread / a plan), `invalid_evidence`, `parse_error`, `contract_error`, `invalid_target`, `ambiguous_target`, `generation_invalid`, `quality_review_failed`, `budget_exhausted`, `secrets_detected`, `existing_skill_unreadable` |
+| `plans` | `{generated, proposals, generation_errors, rejected_targets, deferred}` |
+| `quality_review[]` | per reviewed plan: `{plan, verdict, issues, unknown_refs, calls, corrected, initial_issues}` — `initial_issues` holds the first review's findings whenever a corrective revision ran, on the pass and on the fail path |
 | `coverage[]` | per `reference` candidate: `{skill, title, coverage: text_read \| unverified, sha256}` |
 | `proposals[]` | the SKILL.md paths written |
 | `llm` | `{model, context_window, calls_used, limit, bound, budget_exhausted, note: "transport retries not counted"}` |
 | `stop_message`, `failed` | the `Nothing to save: …` line when the thread stopped early; `<ExceptionType>: <message>` when it failed |
+
+Version 1 reports, written before the SKILL.md stage was renamed from render to generate, have
+`plans.rendered` / `plans.render_errors`, the code `render_invalid` and the stage key `render` in
+`prompts.variants` / `prompts.hashes` and `config.requested.prompts`.
 
 `diagnostics.save_evidence_text: true` additionally writes `<stem>.evidence.md` next to the
 report — `# Round N` followed by `bundle.text` for every bundle build, **without** the exgraph
@@ -1783,7 +1812,7 @@ appendix, without model replies and without `<think>` blocks — and records its
 decisions carry the model's `explanation` (≤ 500 chars) and nothing else of its output.
 
 `diagnostics.save_rejected_drafts: true` (the default) keeps the last SKILL.md draft of every
-refused plan — `render_invalid`, `quality_review_failed`; the corrected draft when a correction
+refused plan — `generation_invalid`, `quality_review_failed`; the corrected draft when a correction
 ran — next to the report as `<stem>.draft-<n>-<plan slug>.rejected.md`, listed in the stamped
 `rejected_draft_files` (`[]` otherwise), each ending in an HTML comment that names the plan and
 the rejection code. A draft that trips the proposal writer's secret scan is not kept (a warning
@@ -1822,7 +1851,7 @@ current session (`config.llms.yml`) and records what came back. Procedure:
    `Accept demo proposal '<name>' into the library anyway?` (answer no — the library stays clean).
 5. Record from `provenance.json` and the decision report: the model id (`model`), the three
    `prompt_hashes`, `config.effective`, the proposal path, `quality_review` (verdict, issues,
-   `corrected`), `llm.calls_used`; and verify the rendered example **by hand** on the CSV of the
+   `corrected`), `llm.calls_used`; and verify the generated example **by hand** on the CSV of the
    fixture — create `input/sales.csv` with `id,amount / 1,10 / 2,20 / 3,30`, substitute the
    `<parameters>` of the SKILL.md `## Workflow` command and check that it prints `60.0` (the
    check step `TOTAL_OK`). The generator never runs this itself; the automated counterpart is
@@ -1842,9 +1871,9 @@ default `default`) and prints the proposal path, the provenance summary (model, 
 decision-report path. `--dry-run` runs the same path without creating an LLM.
 
 Packaged prompt hashes of this build (`prompt_sha256` of the template before substitution):
-classify `sha256:83bc316e95db04d2fb36f8732b15d0a3112b997cd0125450512659ab26824089`, render
-`sha256:a2b88a82791d42ba5be007de7380d732e03adc5eb05c0db30793e9b2ad9b04eb`, review
-`sha256:4bbf85808a6ca2183565b4a19ab7d73da5c5941932c6b2786d79ee1e76a82f35`.
+classify `sha256:24a8bd5a1073148bf18f85ab6cc690029b42413dc3b1c3000ad22ebd6d276230`, generate
+`sha256:b922193e77a34020fff2a8ab31e023e64678e9a62f7803fe6ae10d3ee1f73826`, review
+`sha256:b31b4d0d57d429089aed8a840d11925b1579a87f1f7dd4a3c49cce3cbb572a29`.
 
 Status (2026-09-09): real-LLM run **not executed** in the implementation environment — no LLM
 credentials were available to the automated session (no `OPENAI_API_KEY`, no `.env`, no user
@@ -1855,4 +1884,4 @@ dropped: none`, `up to 16 LLM calls`, nothing written). To complete the smoke te
 `.venv/bin/python scripts/skill_evolver_smoke_demo.py` with the CLI's credentials in the
 environment and replace this paragraph with the recorded model id, prompt hashes,
 `config.effective`, proposal path, `quality_review`, `llm.calls_used` and the hand-check result of
-the rendered example on the CSV.
+the generated example on the CSV.

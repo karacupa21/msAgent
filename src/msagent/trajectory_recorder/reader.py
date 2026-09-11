@@ -42,6 +42,7 @@ Assembly rules:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -544,16 +545,23 @@ def load_trajectories(
     *,
     agent: str | None = None,
     thread_ids: Sequence[str] | None = None,
+    workspace: Path | None = None,
     limit: int | None = None,
 ) -> list[Trajectory]:
     """Load the trajectories of a directory, newest (by mtime) first.
 
     ``agent`` and ``thread_ids`` filter on the envelope of each file's first
-    event; ``limit`` keeps only the newest files after filtering. A missing
-    directory yields an empty list.
+    event, ``workspace`` (an absolute directory) on the ``working_dir`` that
+    event records (see :func:`workspace_key`); ``limit`` keeps only the newest
+    files after filtering. A missing directory yields an empty list.
     """
     if limit is not None and limit < 0:
         raise ValueError(f"limit must be >= 0, got {limit}")
+    workspace_id = None
+    if workspace is not None:
+        workspace_id = workspace_key(workspace)
+        if workspace_id is None:
+            raise ValueError(f"workspace must be an absolute path, got {workspace}")
     directory = Path(directory)
     if not directory.is_dir():
         return []
@@ -563,22 +571,60 @@ def load_trajectories(
         reverse=True,
     )
     wanted = None if thread_ids is None else set(thread_ids)
-    if agent is not None or wanted is not None:
-        files = [file for file in files if _header_matches(file, agent, wanted)]
+    if agent is not None or wanted is not None or workspace_id is not None:
+        files = [f for f in files if _header_matches(f, agent, wanted, workspace_id)]
     if limit is not None:
         files = files[:limit]
     return [load_trajectory(file) for file in files]
+
+
+def workspace_key(path: str | Path) -> str | None:
+    """Identity of a workspace directory; ``None`` when it cannot be known.
+
+    Canonical like ``ProjectPaths.resolve`` (resolved, case-normalized), so a
+    recorded ``working_dir`` and a live one compare equal whenever they name
+    the same directory. A relative path yields ``None``: resolving it would
+    anchor it at the reading process's cwd, not at the recording one's.
+    """
+    if not str(path).strip():
+        return None
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        return None
+    return os.path.normcase(str(candidate.resolve()))
+
+
+def file_workspace(path: Path) -> str | None:
+    """:func:`workspace_key` of the ``working_dir`` a file's first event records.
+
+    Reads one line. A file with no event, or whose first event records no
+    absolute ``working_dir``, belongs to no workspace.
+    """
+    events = iter_events(path)
+    try:
+        header = next(events, None)
+    finally:
+        events.close()
+    return None if header is None else _event_workspace(header)
+
+
+def _event_workspace(event: dict[str, Any]) -> str | None:
+    value = event.get("working_dir")
+    return workspace_key(value) if isinstance(value, str) else None
 
 
 def _header_matches(
     path: Path,
     agent: str | None,
     thread_ids: set[str] | None,
+    workspace: str | None,
 ) -> bool:
     header = _peek_header(path)
     if agent is not None and header.get("agent") != agent:
         return False
-    return thread_ids is None or header.get("thread_id") in thread_ids
+    if thread_ids is not None and header.get("thread_id") not in thread_ids:
+        return False
+    return workspace is None or _event_workspace(header) == workspace
 
 
 def _peek_header(path: Path) -> dict[str, Any]:

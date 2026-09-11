@@ -49,8 +49,8 @@ from msagent.skill_evolver.direct_skill_generation import (
     PlanContext,
 )
 from msagent.skill_evolver.features import extract_episodes
+from msagent.skill_evolver.generate import NO_EXISTING_SKILL, GenerationPlan, GenerationPlans
 from msagent.skill_evolver.prompts import PromptText, StagePrompts, prompt_sha256
-from msagent.skill_evolver.render import NO_EXISTING_SKILL, RenderPlan, RenderPlans
 from msagent.skill_evolver.retrieval import BM25Index
 from msagent.skills.factory import Skill, SkillFactory
 from msagent.trajectory_recorder.config import reset_config_cache
@@ -63,7 +63,7 @@ THREAD_ID = "thread-signals"
 AGENT = "Profiler"
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -179,7 +179,7 @@ def pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_llm_cls):
         return THREAD_ID, [HumanMessage(content="分析性能")]
 
     async def fake_stage_prompt(self, _root, _cfg, stage):
-        templates = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+        templates = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
         return templates[stage], f"packaged/{stage}/prompt_v1.md"
 
     async def fake_load_skills(self):
@@ -324,29 +324,29 @@ async def test_handle_writes_proposal_not_library(pipeline: _Pipeline, tmp_path:
     assert not (tmp_path / "skills" / "default").exists()
     assert pipeline.spy.success == [f"Skill proposal saved to {proposal}"]
     assert pipeline.spy.error == [] and pipeline.spy.warning == []
-    # Three calls: classify, render, quality review.
+    # Three calls: classify, generate, quality review.
     assert len(pipeline.llm.payloads) == 3
     classify_instruction = pipeline.llm.payloads[0][0][1]
-    render_instruction = pipeline.llm.payloads[1][0][1]
+    generation_instruction = pipeline.llm.payloads[1][0][1]
     assert "[ev1]" in classify_instruction and "Evidence: seq" not in classify_instruction
     assert "The skill library is currently empty." in classify_instruction
     assert "# Selection policy: strict_knowledge" in classify_instruction
     assert "{selection_policy}" not in classify_instruction
-    assert "Regenerate sources before type checking." in render_instruction
-    assert "   When: the generated sources are older than the schema" in render_instruction
+    assert "Regenerate sources before type checking." in generation_instruction
+    assert "   When: the generated sources are older than the schema" in generation_instruction
 
     provenance = json.loads((proposal.parent / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["provenance_version"] == 4
+    assert provenance["provenance_version"] == 5
     assert provenance["thread_ids"] == [THREAD_ID]
     assert provenance["model"] == "fake-model"
     assert provenance["prompt_variants"] == {
         "classify": "packaged/classify/prompt_v1.md",
-        "render": "packaged/render/prompt_v1.md",
+        "generate": "packaged/generate/prompt_v1.md",
         "review": "packaged/review/prompt_v1.md",
     }
     assert provenance["prompt_hashes"] == {
         "classify": prompt_sha256(CLASSIFY_TEMPLATE),
-        "render": prompt_sha256(RENDER_TEMPLATE),
+        "generate": prompt_sha256(GENERATION_TEMPLATE),
         "review": prompt_sha256(REVIEW_TEMPLATE),
     }
     assert provenance["features_version"] == 5
@@ -362,7 +362,7 @@ async def test_handle_writes_proposal_not_library(pipeline: _Pipeline, tmp_path:
     assert provenance["target"] == {"action": "create", "existing_skill": None, "existing_path": None}
     source = pipeline.trajectories_dir / f"{AGENT}_{THREAD_ID}.jsonl"
     assert provenance["sources"] == {source.name: str(source)}
-    # The fragments the rendered candidate cites (a subset of what the
+    # The fragments the plan's candidate cites (a subset of what the
     # classify model saw) are in the classify payload and point at the
     # physical line holding that very event.
     shown = provenance["evidence_shown"]
@@ -381,12 +381,12 @@ async def test_handle_writes_proposal_not_library(pipeline: _Pipeline, tmp_path:
     assert (candidate["candidate_id"], candidate["evidence_refs"]) == ("c1", refs)
     assert candidate["applies_when"] == "the generated sources are older than the schema"
     assert provenance["candidates_rejected"] == []
-    # What the renderer was quoted is recorded and was really in its payload.
-    quoted = provenance["render_evidence"]["c1"]
+    # What the generation call was quoted is recorded and was really in its payload.
+    quoted = provenance["generation_evidence"]["c1"]
     assert quoted and set(quoted) <= set(refs)
     for fragment_id in quoted:
-        assert f"   - {shown[fragment_id]['text']}" in render_instruction
-        assert fragment_id not in render_instruction
+        assert f"   - {shown[fragment_id]['text']}" in generation_instruction
+        assert fragment_id not in generation_instruction
 
 
 @pytest.mark.asyncio
@@ -418,7 +418,7 @@ async def test_handle_long_correction_phrase_is_in_provenance(pipeline: _Pipelin
     assert _seq_at(source, entry["line"]) == entry["seq"] == 17
     assert phrase in pipeline.llm.payloads[0][0][1]
     assert phrase in pipeline.llm.payloads[1][0][1]
-    assert provenance["render_evidence"]["c1"] == [correction.id]
+    assert provenance["generation_evidence"]["c1"] == [correction.id]
 
 
 @pytest.mark.asyncio
@@ -479,7 +479,7 @@ async def test_handle_update_passes_existing_text(pipeline: _Pipeline, tmp_path:
     assert "- real: Use when testing." in pipeline.llm.payloads[0][0][1]
     assert skill.path.read_text(encoding="utf-8") == original
     provenance = json.loads((proposal.parent / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["provenance_version"] == 4
+    assert provenance["provenance_version"] == 5
     assert provenance["target"] == {
         "action": "update",
         "existing_skill": "real",
@@ -563,7 +563,7 @@ async def test_handle_rejects_invalid_skill_twice(pipeline: _Pipeline, tmp_path:
     assert len(pipeline.llm.payloads) == 3
     assert pipeline.spy.error[0] == f"plan create: Generated source debugging: {module._REJECTED}"
     # The plan summary is a warning: the thread ran to its end and the report says why nothing was written.
-    assert pipeline.spy.warning[-1] == "Plans: 0 proposals, 1 render errors, 0 rejected targets, 0 deferred"
+    assert pipeline.spy.warning[-1] == "Plans: 0 proposals, 1 generation errors, 0 rejected targets, 0 deferred"
     assert not any(line.startswith("Plans: ") for line in pipeline.spy.error)
     assert any("task identifier" in error for error in pipeline.spy.error)
     assert any("description: must start with" in error for error in pipeline.spy.error)
@@ -584,7 +584,7 @@ async def test_handle_reference_only(pipeline: _Pipeline, tmp_path: Path) -> Non
     assert pipeline.spy.info == [
         module._DEPRECATION_HINT,
         "reference real: Generated source debugging (classifier's claim; skill text read, coverage not verified)",
-        "Nothing to save: no candidate left to render",
+        "Nothing to save: no candidate left for generation",
     ]
     assert not (tmp_path / "skills" / ".proposals").exists()
 
@@ -603,7 +603,7 @@ async def test_handle_unknown_update_target_dropped(pipeline: _Pipeline, tmp_pat
     ]
     assert pipeline.spy.info == [
         module._DEPRECATION_HINT,
-        "Nothing to save: no candidate left to render",
+        "Nothing to save: no candidate left for generation",
     ]
     assert not (tmp_path / "skills").exists()
 
@@ -619,7 +619,7 @@ async def test_handle_reference_to_missing_skill_is_invalid_target(pipeline: _Pi
     (warning,) = pipeline.spy.warning
     assert warning.startswith("Rejected target 'Generated source debugging': invalid_target — ")
     assert "'ghost'" in warning
-    assert pipeline.spy.info == [module._DEPRECATION_HINT, "Nothing to save: no candidate left to render"]
+    assert pipeline.spy.info == [module._DEPRECATION_HINT, "Nothing to save: no candidate left for generation"]
     assert not (tmp_path / "skills" / ".proposals").exists()
 
 
@@ -646,7 +646,7 @@ async def test_handle_ambiguous_bare_name(pipeline: _Pipeline, tmp_path: Path) -
         "Rejected target 'Reference rule'",
     ]
     assert all("ambiguous_target" in w for w in pipeline.spy.warning)
-    assert pipeline.spy.info == [module._DEPRECATION_HINT, "Nothing to save: no candidate left to render"]
+    assert pipeline.spy.info == [module._DEPRECATION_HINT, "Nothing to save: no candidate left for generation"]
     assert not (tmp_path / "skills" / ".proposals").exists()
 
 
@@ -683,12 +683,12 @@ async def test_handle_update_a_and_update_b_two_proposals(pipeline: _Pipeline, t
     assert for_alpha["target"]["existing_skill"] == "alpha"
     assert [c["candidate_id"] for c in for_alpha["candidates"]] == ["c1"]
     assert set(for_alpha["evidence_shown"]) == set(refs[:1])
-    assert for_alpha["render_evidence"] == {"c1": refs[:1]}
+    assert for_alpha["generation_evidence"] == {"c1": refs[:1]}
     assert "Beta rule" not in json.dumps(for_alpha)
     assert for_beta["target"]["existing_skill"] == "beta"
     assert [c["candidate_id"] for c in for_beta["candidates"]] == ["c2"]
     assert set(for_beta["evidence_shown"]) == set(refs[1:])
-    assert pipeline.spy.info[-1] == "Plans: 2 proposals, 0 render errors, 0 rejected targets, 0 deferred"
+    assert pipeline.spy.info[-1] == "Plans: 2 proposals, 0 generation errors, 0 rejected targets, 0 deferred"
 
 
 @pytest.mark.asyncio
@@ -760,7 +760,7 @@ async def test_handle_first_plan_fails_second_written(pipeline: _Pipeline, tmp_p
     assert not _proposal(tmp_path, SKILL_NAME).exists()
     assert _proposal(tmp_path, SECOND_NAME).is_file()
     assert pipeline.spy.success == [f"Skill proposal saved to {_proposal(tmp_path, SECOND_NAME)}"]
-    assert pipeline.spy.warning[-1] == "Plans: 1 proposals, 1 render errors, 0 rejected targets, 0 deferred"
+    assert pipeline.spy.warning[-1] == "Plans: 1 proposals, 1 generation errors, 0 rejected targets, 0 deferred"
 
 
 @pytest.mark.asyncio
@@ -776,7 +776,7 @@ async def test_handle_plans_over_limit_deferred(pipeline: _Pipeline, tmp_path: P
     assert "Deferred plan: create: Profile before summary — max_plans 1 reached" in pipeline.spy.info
     assert _proposal(tmp_path, SKILL_NAME).is_file()
     assert not _proposal(tmp_path, SECOND_NAME).exists()
-    assert pipeline.spy.info[-1] == "Plans: 1 proposals, 0 render errors, 0 rejected targets, 1 deferred"
+    assert pipeline.spy.info[-1] == "Plans: 1 proposals, 0 generation errors, 0 rejected targets, 1 deferred"
 
 
 # ------------------------------------------------------------ plan helpers
@@ -784,7 +784,7 @@ async def test_handle_plans_over_limit_deferred(pipeline: _Pipeline, tmp_path: P
 
 def _prompts() -> StagePrompts:
     """The fake templates as the pipeline's prompt record (honest hashes of the fake text)."""
-    texts = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+    texts = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
     return StagePrompts(
         **{
             stage: PromptText(stage, text, f"packaged/{stage}/prompt_v1.md", prompt_sha256(text), 2)
@@ -813,7 +813,7 @@ def _plan_context(tmp_path: Path) -> tuple[PlanContext, list[str]]:
     return context, sorted(bundle.shown)[:2]
 
 
-def _render_kwargs(tmp_path: Path, llm: Any, context: PlanContext, taken: set[str]) -> dict[str, Any]:
+def _generation_kwargs(tmp_path: Path, llm: Any, context: PlanContext, taken: set[str]) -> dict[str, Any]:
     """The keyword arguments of the per-plan function with an unlimited context budget and default rules."""
     return {
         "llm": llm,
@@ -825,26 +825,26 @@ def _render_kwargs(tmp_path: Path, llm: Any, context: PlanContext, taken: set[st
     }
 
 
-def _plan(refs: list[str], existing: Skill | None = None, **overrides: Any) -> RenderPlan:
+def _plan(refs: list[str], existing: Skill | None = None, **overrides: Any) -> GenerationPlan:
     data = _candidate(refs, **overrides)
     if existing is not None:
         data["target"] = {"action": "update", "existing_skill": existing.display_name}
     candidate = Candidate.model_validate(data).model_copy(update={"candidate_id": "c1"})
-    return RenderPlan(candidates=[candidate], existing=existing)
+    return GenerationPlan(candidates=[candidate], existing=existing)
 
 
 @pytest.mark.asyncio
-async def test_render_plan_create_adds_name_to_taken(tmp_path: Path, fake_llm_cls) -> None:
+async def test_generate_for_plan_create_adds_name_to_taken(tmp_path: Path, fake_llm_cls) -> None:
     context, refs = _plan_context(tmp_path)
     llm = fake_llm_cls(VALID_SKILL, REVIEW_PASS)
     taken = {"other"}
 
-    outcome = await DirectSkillGenerationHandler._render_plan(
-        _plan(refs), **_render_kwargs(tmp_path, llm, context, taken)
+    outcome = await DirectSkillGenerationHandler._generate_for_plan(
+        _plan(refs), **_generation_kwargs(tmp_path, llm, context, taken)
     )
 
     assert outcome.written and outcome.name == SKILL_NAME
-    # Render plus one quality review.
+    # One generation call plus one quality review.
     assert outcome.calls == 2 and outcome.errors == [] and outcome.rejection is None
     assert outcome.review["verdict"] == "pass" and outcome.review["corrected"] is False
     assert outcome.skill_path == tmp_path / "skills" / ".proposals" / THREAD_ID / SKILL_NAME / "SKILL.md"
@@ -853,14 +853,14 @@ async def test_render_plan_create_adds_name_to_taken(tmp_path: Path, fake_llm_cl
 
 
 @pytest.mark.asyncio
-async def test_render_plan_update_reads_existing_and_leaves_taken(tmp_path: Path, fake_llm_cls) -> None:
+async def test_generate_for_plan_update_reads_existing_and_leaves_taken(tmp_path: Path, fake_llm_cls) -> None:
     context, refs = _plan_context(tmp_path)
     skill = _library_skill(tmp_path, "real")
     llm = fake_llm_cls(_revised("real"), REVIEW_PASS)
     taken: set[str] = set()
 
-    outcome = await DirectSkillGenerationHandler._render_plan(
-        _plan(refs, existing=skill), **_render_kwargs(tmp_path, llm, context, taken)
+    outcome = await DirectSkillGenerationHandler._generate_for_plan(
+        _plan(refs, existing=skill), **_generation_kwargs(tmp_path, llm, context, taken)
     )
 
     assert outcome.written and outcome.name == "real" and outcome.calls == 2
@@ -876,16 +876,16 @@ async def test_render_plan_update_reads_existing_and_leaves_taken(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_render_plan_invalid_twice_returns_errors_without_writing(tmp_path: Path, fake_llm_cls) -> None:
+async def test_generate_for_plan_invalid_twice_returns_errors_without_writing(tmp_path: Path, fake_llm_cls) -> None:
     context, refs = _plan_context(tmp_path)
     llm = fake_llm_cls(INVALID_SKILL, INVALID_SKILL)
     taken = {"other"}
 
-    outcome = await DirectSkillGenerationHandler._render_plan(
-        _plan(refs), **_render_kwargs(tmp_path, llm, context, taken)
+    outcome = await DirectSkillGenerationHandler._generate_for_plan(
+        _plan(refs), **_generation_kwargs(tmp_path, llm, context, taken)
     )
 
-    # Two render calls, no review: the validator refused both replies.
+    # Two generation calls, no review: the validator refused both replies.
     assert not outcome.written and outcome.calls == 2 and outcome.rejection is None and outcome.review is None
     assert any("missing section '## Inputs'" in error for error in outcome.errors)
     assert taken == {"other"}
@@ -893,14 +893,14 @@ async def test_render_plan_invalid_twice_returns_errors_without_writing(tmp_path
 
 
 def test_report_plans_lines(tmp_path: Path) -> None:
-    from msagent.skill_evolver.render import PlanRejection
+    from msagent.skill_evolver.generate import PlanRejection
 
     skill = Skill(name="real", description="Use when testing.", category="profiler", path=tmp_path / "SKILL.md")
     refs = ["ev1"]
     kept = Candidate.model_validate(_candidate(refs, title="Kept"))
-    plans = RenderPlans(
+    plans = GenerationPlans(
         plans=[],
-        deferred=[(RenderPlan(candidates=[kept], existing=None), "max_plans 1 reached")],
+        deferred=[(GenerationPlan(candidates=[kept], existing=None), "max_plans 1 reached")],
         references=[(Candidate.model_validate(_candidate(refs, title="Seen")), skill)],
         rejected=[PlanRejection(Candidate.model_validate(_candidate(refs, title="Lost")), "invalid_target", "why")],
     )
@@ -980,16 +980,16 @@ def test_cited_threads_lists_supporting_threads_after_current() -> None:
 async def test_load_stage_prompt_prefers_user_root_then_packaged(tmp_path: Path) -> None:
     handler = DirectSkillGenerationHandler(_session(tmp_path))
     root = tmp_path / "prompts"
-    (root / "render").mkdir(parents=True)
-    (root / "render" / "prompt_v2.md").write_text(
-        "## description: x\n## contract_version: 2\nuser render {candidates} {existing_skill} {render_policy}\n",
+    (root / "generate").mkdir(parents=True)
+    (root / "generate" / "prompt_v2.md").write_text(
+        "## description: x\n## contract_version: 2\nuser generate {candidates} {existing_skill} {generation_policy}\n",
         encoding="utf-8",
     )
     cfg = DirectSkillGenerationConfig()
 
-    text, source = await handler._load_stage_prompt(root, cfg, "render")
-    assert "user render" in text
-    assert source == str(root / "render" / "prompt_v2.md")
+    text, source = await handler._load_stage_prompt(root, cfg, "generate")
+    assert "user generate" in text
+    assert source == str(root / "generate" / "prompt_v2.md")
 
     text, source = await handler._load_stage_prompt(root, cfg, "classify")
     assert "{evidence_bundle}" in text and "{skill_library}" in text and "{selection_policy}" in text
@@ -1016,11 +1016,11 @@ async def test_load_stage_prompt_missing_file_is_an_error(tmp_path: Path, monkey
     assert spy.warning == []
 
 
-def test_packaged_render_prompt_is_resolved_by_default_config() -> None:
+def test_packaged_generate_prompt_is_resolved_by_default_config() -> None:
     cfg = DirectSkillGenerationHandler._load_config()
     packaged = REPO_ROOT / "resources" / "configs" / "default" / "skill-evolver" / "prompts"
 
-    assert module.STAGES == ("classify", "render", "review")
+    assert module.STAGES == ("classify", "generate", "review")
     for stage in module.STAGES:
         assert (packaged / stage / cfg.prompt_for(stage)).is_file()
 
@@ -1258,9 +1258,15 @@ async def test_direct_run_writes_decision_report_and_prompts_line_lists_review(
     (report_path,) = sorted(decisions.glob("*.json"))
     assert report_path.name.startswith(f"{THREAD_ID}-")
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["report_version"] == 1 and report["command"] == "direct-skill-generation"
+    assert report["report_version"] == 2 and report["command"] == "direct-skill-generation"
     assert report["thread_id"] == THREAD_ID and report["synthetic"] is False
-    assert report["plans"] == {"rendered": 1, "proposals": 1, "render_errors": 0, "rejected_targets": 0, "deferred": 0}
+    assert report["plans"] == {
+        "generated": 1,
+        "proposals": 1,
+        "generation_errors": 0,
+        "rejected_targets": 0,
+        "deferred": 0,
+    }
     assert report["llm"]["calls_used"] == 3 and report["llm"]["limit"] == 16 and report["llm"]["bound"] == 16
     assert report["prompts"]["variants"]["review"] == "packaged/review/prompt_v1.md"
     assert report["gate"]["passes"] is True and report["stop_message"] is None and report["failed"] is None
@@ -1268,7 +1274,7 @@ async def test_direct_run_writes_decision_report_and_prompts_line_lists_review(
     assert not sorted(decisions.glob("*.evidence.md"))
     plain = pipeline.spy.plain
     prompts_line = (
-        "Prompts: classify=packaged/classify/prompt_v1.md, render=packaged/render/prompt_v1.md, "
+        "Prompts: classify=packaged/classify/prompt_v1.md, generate=packaged/generate/prompt_v1.md, "
         "review=packaged/review/prompt_v1.md"
     )
     assert any(prompts_line in line for line in plain)

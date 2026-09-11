@@ -16,20 +16,20 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 
-"""Policy blocks inserted into the classify, render and review prompts.
+"""Policy blocks inserted into the classify, generate and review prompts.
 
 Rules:
 
 * The fixed prompt texts carry no selection criteria; everything that
   decides *which* evidence deserves a candidate lives in exactly one block
   per stage, inserted at ``{selection_policy}`` (classify),
-  ``{render_policy}`` (render) and ``{review_policy}`` (review). The
+  ``{generation_policy}`` (generate) and ``{review_policy}`` (review). The
   ``demo_workflow`` block is the only one that admits a trivial procedure,
   so a prompt can never demand non-obviousness and allow triviality at once.
 * The classify block is chosen by the effective selection
   (``strict_knowledge`` | ``reusable_workflow`` | ``demo_workflow``); the
-  render and review blocks by the effective demo flag. Callers pass plain
-  values: this module imports nothing from the config.
+  generation and review blocks by the effective demo flag. Callers pass
+  plain values: this module imports nothing from the config.
 * The evidence standard is the same under every block; demo lowers novelty,
   never evidence.
 * Blocks contain no ``{`` / ``}`` and are inserted with ``str.replace`` or a
@@ -41,7 +41,7 @@ Stdlib only.
 from __future__ import annotations
 
 SELECTION_POLICY_PLACEHOLDER = "{selection_policy}"
-RENDER_POLICY_PLACEHOLDER = "{render_policy}"
+GENERATION_POLICY_PLACEHOLDER = "{generation_policy}"
 REVIEW_POLICY_PLACEHOLDER = "{review_policy}"
 # Name prefix every demo proposal must carry (validator ``required_prefix``).
 DEMO_NAME_PREFIX = "demo-"
@@ -77,11 +77,11 @@ _SELECTION_BLOCKS = {
     "demo_workflow": DEMO_WORKFLOW_BLOCK,
 }
 
-RENDER_POLICY_NORMAL = (
+GENERATION_POLICY_NORMAL = (
     "Selection policy: ordinary. The candidates passed the evidence gate on their own merit. "
     "Name a new skill after its task class as described in the Task section."
 )
-RENDER_POLICY_DEMO = (
+GENERATION_POLICY_DEMO = (
     "Selection policy: demo. The candidates describe a confirmed procedure that may be trivial or already "
     "common knowledge. Write it anyway, as a teaching skill: concrete inputs with their format, the exact "
     "operation with its real argument shape, the observed result and how to check it — never generic advice. "
@@ -109,9 +109,9 @@ def selection_policy_block(selection: str) -> str:
     return block
 
 
-def render_policy_block(demo: bool) -> str:
-    """The ``{render_policy}`` text for the effective demo flag."""
-    return RENDER_POLICY_DEMO if demo else RENDER_POLICY_NORMAL
+def generation_policy_block(demo: bool) -> str:
+    """The ``{generation_policy}`` text for the effective demo flag."""
+    return GENERATION_POLICY_DEMO if demo else GENERATION_POLICY_NORMAL
 
 
 def review_policy_block(demo: bool) -> str:

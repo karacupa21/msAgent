@@ -429,10 +429,10 @@ _ISOLATION_PROBE = """
 import sys
 import msagent.skill_evolver.validator as validator
 import msagent.skill_evolver.writer as writer
-import msagent.skill_evolver.render as render
+import msagent.skill_evolver.generate as generate
 import msagent.skill_evolver.review as review
 import msagent.skill_evolver.policy as policy
-for module in (validator, writer, render, review, policy):
+for module in (validator, writer, generate, review, policy):
     assert module.__file__.startswith(sys.argv[1]), module.__file__
 banned = ("langchain", "langgraph", "httpx", "requests", "urllib3", "aiohttp",
           "urllib.request", "http.client")
@@ -441,7 +441,7 @@ assert not leaked, leaked
 """
 
 
-def test_validator_writer_render_review_import_no_langchain_or_network() -> None:
+def test_validator_writer_generate_review_import_no_langchain_or_network() -> None:
     # The pytest process already has langchain loaded (conftest imports the CLI
     # initializer), so the check runs in a fresh interpreter; PYTHONPATH must
     # win over the wheel that may be installed in the virtualenv.

@@ -34,7 +34,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from msagent.trajectory_recorder.callback import TrajectoryCallbackHandler
-from msagent.trajectory_recorder.config import TrajectoryRecorderConfig, load_trajectory_config
+from msagent.trajectory_recorder.config import (
+    TrajectoryRecorderConfig,
+    load_trajectory_config,
+    store_dir,
+)
 from msagent.trajectory_recorder.recorder import SCHEMA_VERSION, TrajectoryRecorder
 from msagent.trajectory_recorder.serialize import json_safe
 
@@ -52,17 +56,30 @@ def _sanitize_component(value: str, fallback: str) -> str:
     return cleaned or fallback
 
 
+def _canonical_working_dir(context: Any) -> str:
+    """The context's working dir as an absolute canonical path, "" when unset.
+
+    The shared store attributes each file to its workspace by this value, so a
+    relative ``-w`` must not reach the file: nothing could resolve it later.
+    """
+    working_dir = getattr(context, "working_dir", None)
+    if not working_dir:
+        return ""
+    return str(Path(working_dir).expanduser().resolve())
+
+
 def build_trajectory_path(
     *,
     config: TrajectoryRecorderConfig,
-    state_dir: Path,
+    state_dir: Path | None,
     agent: str,
     thread_id: str,
 ) -> Path:
-    """Resolve the trajectory file for one conversation thread."""
-    directory = Path(config.output.directory).expanduser()
-    if not directory.is_absolute():
-        directory = state_dir / directory
+    """Resolve the trajectory file for one conversation thread.
+
+    ``state_dir`` anchors the workspace scope; the shared scope ignores it.
+    """
+    directory = store_dir(config, state_dir=state_dir)
 
     fields = {
         "agent": _sanitize_component(agent, "agent"),
@@ -107,9 +124,12 @@ class _TrajectoryManager:
             with self._lock:
                 return self._by_thread.get(thread_id)
 
-        state_dir = self._resolve_state_dir(context)
-        if state_dir is None:
-            return None
+        if config.is_shared:
+            state_dir = None
+        else:
+            state_dir = self._resolve_state_dir(context)
+            if state_dir is None:
+                return None
         path = build_trajectory_path(config=config, state_dir=state_dir, agent=agent, thread_id=thread_id)
         key = str(path)
 
@@ -147,7 +167,7 @@ class _TrajectoryManager:
         snapshot: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "capture_level": config.capture.level.value,
-            "working_dir": str(getattr(context, "working_dir", "") or ""),
+            "working_dir": _canonical_working_dir(context),
             "model": getattr(context, "model", None),
             "model_display": getattr(context, "model_display", None),
         }

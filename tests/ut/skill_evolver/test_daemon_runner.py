@@ -62,7 +62,7 @@ DEMO_AGENT = "SyntheticDemo"
 DEMO_SKILL_NAME = "demo-csv-column-sum"
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -154,7 +154,7 @@ def _boom(*_args, **_kwargs):
 
 
 async def _fake_stage_prompt(_self, _root, _cfg, stage):
-    templates = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+    templates = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
     return templates[stage], f"packaged/{stage}/prompt_v2.md"
 
 
@@ -218,7 +218,7 @@ class _Env:
         self.llm = self.fake_llm_cls(*replies)
 
     def demo_replies(self, skill: str = DEMO_SKILL) -> tuple[str, str, str]:
-        """classify (citing the fixture's real fragment ids), render, review."""
+        """classify (citing the fixture's real fragment ids), generate, review."""
         trajectory = load_trajectory(self.source)
         bundle = build_evidence_bundle(
             extract_episodes(trajectory, demo=True),
@@ -573,3 +573,88 @@ async def test_project_filter_restricts_the_tick(env: _Env, monkeypatch: pytest.
     result = await run_once(now=NOW, dry_run=True, project_filter=str(env.working_dir / "elsewhere"))
     assert result.projects == 0
     assert result.threads == 0
+
+
+# ------------------------------------------------------------- shared store
+
+
+def _record_in(source: Path, target: Path, working_dir: Path, *, thread_id: str | None = None) -> Path:
+    """Copy a trajectory as if it had been recorded in ``working_dir`` (under ``thread_id``)."""
+    lines: list[str] = []
+    for raw in source.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        event = json.loads(raw)
+        if thread_id is not None:
+            event["thread_id"] = thread_id
+        if event.get("event") == "recorder.attach":
+            event["working_dir"] = str(working_dir)
+        lines.append(json.dumps(event, ensure_ascii=False))
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+@pytest.fixture
+def shared_env(env: _Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Env:
+    """``env`` over the shared store: its thread moves there, beside a second, idle project."""
+    config = tmp_path / "config.trajectory.recorder.yml"
+    config.write_text("output:\n  scope: shared\n", encoding="utf-8")
+    monkeypatch.setenv("MSAGENT_TRAJECTORY_CONFIG", str(config))
+    reset_config_cache()
+
+    store = initializer.app_paths.state_dir / "trajectories"
+    store.mkdir(parents=True)
+    recorded = env.source
+    env.source = _record_in(recorded, store / recorded.name, env.working_dir)
+    recorded.unlink()
+    env.age(env.source, QUIET + 60)
+
+    other = (tmp_path / "other").resolve()
+    other.mkdir()
+    env.other_state_dir = initializer.get_project_paths(other).root
+    env.other_state_dir.mkdir(parents=True)
+    (env.other_state_dir / "project.json").write_text(
+        json.dumps({"working_dir": str(other)}),
+        encoding="utf-8",
+    )
+    return env
+
+
+@pytest.mark.asyncio
+async def test_a_shared_store_thread_is_mined_once_under_its_origin_project(shared_env: _Env) -> None:
+    """Both projects resolve the same store; only the recording one mines the thread.
+
+    Scanning the store per project would mine it twice and run out of scripted replies.
+    """
+    shared_env.script(*shared_env.demo_replies())
+
+    result = await run_once(now=NOW)
+
+    assert result.ran is True
+    assert result.projects == 2
+    assert (result.threads, result.proposals, result.failures) == (1, 1, 0)
+    assert shared_env.proposal().is_file()
+    entry = shared_env.ledger_entry()
+    assert entry is not None
+    assert entry.status == STATUS_MINED
+    with Ledger.open(daemon_state_dir()) as ledger:
+        assert ledger.entry(shared_env.other_state_dir.name, DEMO_THREAD_ID) is None
+
+
+def test_the_shared_pool_keeps_to_the_origin_workspace(shared_env: _Env, tmp_path: Path) -> None:
+    """A background verdict must match /skill-mine in that workspace, so the pool does."""
+    store = shared_env.source.parent
+    elsewhere = store / f"{DEMO_AGENT}_thread-elsewhere.jsonl"
+    _record_in(DEMO, elsewhere, tmp_path / "other", thread_id="thread-elsewhere")
+
+    pool, _ = runner_module._pool_and_targets(
+        store,
+        DEMO_AGENT,
+        [],
+        cross_session_limit=20,
+        workspace=shared_env.working_dir,
+    )
+    everything, _ = runner_module._pool_and_targets(store, DEMO_AGENT, [], cross_session_limit=20)
+
+    assert [trajectory.thread_id for trajectory in pool] == [DEMO_THREAD_ID]
+    assert sorted(trajectory.thread_id for trajectory in everything) == [DEMO_THREAD_ID, "thread-elsewhere"]

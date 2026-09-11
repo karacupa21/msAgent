@@ -38,6 +38,7 @@ from msagent.skill_evolver.bundle import build_evidence_bundle
 from msagent.skill_evolver.classify import BUNDLE_PLACEHOLDER, ClassifyParseError
 from msagent.skill_evolver.config import DirectSkillGenerationConfig, apply_overrides, effective_rules
 from msagent.skill_evolver.features import DetectorNote, extract_episodes
+from msagent.skill_evolver.generate import resolve_library_skill
 from msagent.skill_evolver.pipeline import (
     REJECTED,
     CodeRejection,
@@ -52,7 +53,6 @@ from msagent.skill_evolver.pipeline import (
 )
 from msagent.skill_evolver.policy import selection_policy_block
 from msagent.skill_evolver.prompts import PromptText, StagePrompts, prompt_sha256
-from msagent.skill_evolver.render import resolve_library_skill
 from msagent.skill_evolver.report import decisions_dir
 from msagent.skills.factory import Skill
 from msagent.trajectory_recorder.reader import load_trajectory
@@ -65,7 +65,7 @@ THREAD_ID = "thread-signals"
 DEMO_THREAD_ID = "thread-demo-synthetic"
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -238,7 +238,7 @@ class _Sink:
 
 
 def _prompts(classify: str = CLASSIFY_TEMPLATE, *, contract_version: int = 2) -> StagePrompts:
-    texts = {"classify": classify, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+    texts = {"classify": classify, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
     return StagePrompts(
         **{
             stage: PromptText(stage, text, f"fake/{stage}", prompt_sha256(text), contract_version)
@@ -362,7 +362,7 @@ async def test_budget_exhausted_mid_plan_writes_nothing_and_defers_the_rest(tmp_
     thread = _thread()
     refs = _refs(thread)
     second = _candidate(refs, title="Profile before summary")
-    # classify (1), invalid render (2), corrected render (3): the review would be call 4.
+    # classify (1), invalid SKILL.md (2), corrected SKILL.md (3): the review would be call 4.
     harness = _Harness(
         tmp_path,
         fake_llm_cls,
@@ -377,7 +377,7 @@ async def test_budget_exhausted_mid_plan_writes_nothing_and_defers_the_rest(tmp_
     assert harness.llm.replies == [] and result.llm_calls == 3 and result.llm_limit == 3
     assert result.budget_stop is True
     tally = result.tally
-    assert (tally.plans, tally.proposals, tally.render_errors, tally.deferred) == (1, 0, 1, 1)
+    assert (tally.plans, tally.proposals, tally.generation_errors, tally.deferred) == (1, 0, 1, 1)
     (error,) = harness.sink.error
     assert error.startswith("plan create: Generated source debugging: LLM call budget exhausted (3/3")
     assert error.endswith("; SKILL.md not written")
@@ -386,7 +386,13 @@ async def test_budget_exhausted_mid_plan_writes_nothing_and_defers_the_rest(tmp_
     assert not (tmp_path / "skills").exists()
     (report,) = harness.reports()
     assert report["llm"]["budget_exhausted"] is True and report["llm"]["calls_used"] == 3
-    assert report["plans"] == {"rendered": 1, "proposals": 0, "render_errors": 1, "rejected_targets": 0, "deferred": 1}
+    assert report["plans"] == {
+        "generated": 1,
+        "proposals": 0,
+        "generation_errors": 1,
+        "rejected_targets": 0,
+        "deferred": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -738,7 +744,7 @@ async def test_quality_review_blocks_after_one_correction(tmp_path: Path, fake_l
 
     result = await harness.thread(thread)
 
-    assert len(harness.llm.payloads) == 5 and result.tally.render_errors == 1
+    assert len(harness.llm.payloads) == 5 and result.tally.generation_errors == 1
     assert harness.sink.error == [
         "plan create: Generated source debugging: quality review failed after one correction; nothing written:",
         "  - unsupported_addition: the evidence shows no --jobs flag",
@@ -746,7 +752,7 @@ async def test_quality_review_blocks_after_one_correction(tmp_path: Path, fake_l
     assert [rejection.code for rejection in result.code_rejections] == ["quality_review_failed"]
     assert not (tmp_path / "skills").exists()
     (report,) = harness.reports()
-    assert report["quality_review"][0]["verdict"] == "fail" and report["plans"]["render_errors"] == 1
+    assert report["quality_review"][0]["verdict"] == "fail" and report["plans"]["generation_errors"] == 1
     # The first review's findings survive the failed correction, and the corrected draft is
     # kept next to the report — in the private state, never under skills/.
     assert report["quality_review"][0]["initial_issues"] == ["unsupported_addition: the evidence shows no --jobs flag"]
@@ -776,7 +782,7 @@ async def test_rejected_draft_is_not_kept_when_disabled(tmp_path: Path, fake_llm
 
     result = await harness.thread(thread)
 
-    assert result.tally.render_errors == 1 and result.rejected_draft_paths == []
+    assert result.tally.generation_errors == 1 and result.rejected_draft_paths == []
     (report,) = harness.reports()
     assert report["rejected_draft_files"] == []
     assert list(result.report_path.parent.glob("*.rejected.md")) == []
@@ -791,7 +797,7 @@ async def test_quality_reviewer_invalid_twice_writes_nothing(tmp_path: Path, fak
 
     result = await harness.thread(thread)
 
-    assert len(harness.llm.payloads) == 4 and result.tally.render_errors == 1
+    assert len(harness.llm.payloads) == 4 and result.tally.generation_errors == 1
     (error,) = harness.sink.error
     assert error.startswith(
         "plan create: Generated source debugging: quality reviewer reply invalid; nothing written: "
@@ -871,7 +877,7 @@ async def test_classify_payload_gets_exactly_one_policy_block_and_hashes_recorde
     assert "- real: Use when testing." in payload
     assert "Selection policy: ordinary." in harness.payload(1) and "Review policy: ordinary." in harness.payload(2)
     hashes = harness.run.prompts.hashes()
-    assert set(hashes) == {"classify", "render", "review"} and all(h.startswith("sha256:") for h in hashes.values())
+    assert set(hashes) == {"classify", "generate", "review"} and all(h.startswith("sha256:") for h in hashes.values())
     assert _provenance(harness.proposal(SKILL_NAME))["prompt_hashes"] == hashes
     (report,) = harness.reports()
     assert report["prompts"] == {"contract_version": 2, "variants": harness.run.prompts.variants(), "hashes": hashes}
@@ -1020,8 +1026,10 @@ async def test_load_prompts_hashes_the_returned_text_and_records_the_config_cont
 
     prompts = await module.load_prompts(loader, tmp_path, DirectSkillGenerationConfig())
 
-    assert prompts.variants() == {stage: f"user/{stage}/prompt_v2.md" for stage in ("classify", "render", "review")}
-    assert prompts.hashes() == {stage: prompt_sha256(f"text of {stage}") for stage in ("classify", "render", "review")}
+    assert prompts.variants() == {stage: f"user/{stage}/prompt_v2.md" for stage in ("classify", "generate", "review")}
+    assert prompts.hashes() == {
+        stage: prompt_sha256(f"text of {stage}") for stage in ("classify", "generate", "review")
+    }
     assert prompts.review.contract_version == 2
 
 
@@ -1067,11 +1075,11 @@ def test_bundle_preview_lines_for_a_demo_thread() -> None:
 
 def test_report_plans_and_rejection_lines() -> None:
     from msagent.skill_evolver.classify import Candidate
-    from msagent.skill_evolver.render import RenderPlan, RenderPlans
+    from msagent.skill_evolver.generate import GenerationPlan, GenerationPlans
 
     candidate = Candidate.model_validate(_candidate(["ev1"], title="Seen"))
     skill = Skill(name="real", description="", category="profiler", path=Path("/lib/real/SKILL.md"))
-    plans = RenderPlans(plans=[], deferred=[], references=[(candidate, skill), (candidate, skill)], rejected=[])
+    plans = GenerationPlans(plans=[], deferred=[], references=[(candidate, skill), (candidate, skill)], rejected=[])
 
     _warnings, notes = module.report_plans(plans, ["text_read"])
 
@@ -1080,7 +1088,7 @@ def test_report_plans_and_rejection_lines() -> None:
         "reference profiler/real: Seen (classifier's claim; skill text unreadable, coverage not verified)",
     ]
 
-    plan = RenderPlan(candidates=[candidate], existing=None)
+    plan = GenerationPlan(candidates=[candidate], existing=None)
     budget = module.PlanOutcome(
         plan,
         0,
@@ -1088,7 +1096,10 @@ def test_report_plans_and_rejection_lines() -> None:
         rejection=CodeRejection("insufficient_context_budget", plan.label, "x"),
     )
     assert module.rejection_lines(plan.label, budget) == [
-        "plan create: Seen: required evidence does not fit the render budget (insufficient_context_budget); nothing written:",
+        (
+            "plan create: Seen: required evidence does not fit the evidence budget "
+            "(insufficient_context_budget); nothing written:"
+        ),
         "  - c1: required evidence ['ev1'] does not fit",
     ]
     secrets = module.PlanOutcome(

@@ -27,16 +27,16 @@ import pytest
 from msagent.skill_evolver.policy import (
     DEMO_NAME_PREFIX,
     DEMO_WORKFLOW_BLOCK,
-    RENDER_POLICY_DEMO,
-    RENDER_POLICY_NORMAL,
-    RENDER_POLICY_PLACEHOLDER,
+    GENERATION_POLICY_DEMO,
+    GENERATION_POLICY_NORMAL,
+    GENERATION_POLICY_PLACEHOLDER,
     REUSABLE_WORKFLOW_BLOCK,
     REVIEW_POLICY_DEMO,
     REVIEW_POLICY_NORMAL,
     REVIEW_POLICY_PLACEHOLDER,
     SELECTION_POLICY_PLACEHOLDER,
     STRICT_KNOWLEDGE_BLOCK,
-    render_policy_block,
+    generation_policy_block,
     review_policy_block,
     selection_policy_block,
 )
@@ -44,7 +44,7 @@ from msagent.skill_evolver.policy import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROMPTS = REPO_ROOT / "resources" / "configs" / "default" / "skill-evolver" / "prompts"
 CLASSIFY_PROMPT = PROMPTS / "classify" / "prompt_v2.md"
-RENDER_PROMPT = PROMPTS / "render" / "prompt_v2.md"
+GENERATION_PROMPT = PROMPTS / "generate" / "prompt_v2.md"
 REVIEW_PROMPT = PROMPTS / "review" / "prompt_v2.md"
 
 SELECTIONS = ("strict_knowledge", "reusable_workflow", "demo_workflow")
@@ -83,8 +83,10 @@ def test_selection_blocks_have_a_heading_and_no_placeholders(selection: str) -> 
     assert block == block.strip()
 
 
-@pytest.mark.parametrize("block", [RENDER_POLICY_NORMAL, RENDER_POLICY_DEMO, REVIEW_POLICY_NORMAL, REVIEW_POLICY_DEMO])
-def test_render_and_review_blocks_have_no_placeholders(block: str) -> None:
+@pytest.mark.parametrize(
+    "block", [GENERATION_POLICY_NORMAL, GENERATION_POLICY_DEMO, REVIEW_POLICY_NORMAL, REVIEW_POLICY_DEMO]
+)
+def test_generation_and_review_blocks_have_no_placeholders(block: str) -> None:
     assert "{" not in block and "}" not in block
     assert block == block.strip() and "\n" not in block
 
@@ -119,26 +121,26 @@ def test_demo_block_allows_triviality_and_keeps_the_evidence_standard() -> None:
     assert "`insufficient_evidence`" in DEMO_WORKFLOW_BLOCK and "`unsafe_procedure`" in DEMO_WORKFLOW_BLOCK
 
 
-def test_render_and_review_blocks_follow_the_demo_flag() -> None:
-    assert render_policy_block(False) == RENDER_POLICY_NORMAL
-    assert render_policy_block(True) == RENDER_POLICY_DEMO
+def test_generation_and_review_blocks_follow_the_demo_flag() -> None:
+    assert generation_policy_block(False) == GENERATION_POLICY_NORMAL
+    assert generation_policy_block(True) == GENERATION_POLICY_DEMO
     assert review_policy_block(False) == REVIEW_POLICY_NORMAL
     assert review_policy_block(True) == REVIEW_POLICY_DEMO
     assert DEMO_NAME_PREFIX == "demo-"
-    assert f"`{DEMO_NAME_PREFIX}`" in RENDER_POLICY_DEMO and "demo-csv-column-sum" in RENDER_POLICY_DEMO
-    assert "new skill" in RENDER_POLICY_DEMO and "trivial" in RENDER_POLICY_DEMO
-    assert "demo" not in RENDER_POLICY_NORMAL
+    assert f"`{DEMO_NAME_PREFIX}`" in GENERATION_POLICY_DEMO and "demo-csv-column-sum" in GENERATION_POLICY_DEMO
+    assert "new skill" in GENERATION_POLICY_DEMO and "trivial" in GENERATION_POLICY_DEMO
+    assert "demo" not in GENERATION_POLICY_NORMAL
     assert "Judge fidelity, not value" in REVIEW_POLICY_NORMAL and "Judge fidelity, not value" in REVIEW_POLICY_DEMO
     assert "triviality" in REVIEW_POLICY_NORMAL
     assert "`name_policy`" in REVIEW_POLICY_DEMO and f"`{DEMO_NAME_PREFIX}`" in REVIEW_POLICY_DEMO
     assert "create" in REVIEW_POLICY_DEMO
     assert "demo" not in REVIEW_POLICY_NORMAL
-    _assert_none_of(RENDER_POLICY_DEMO + REVIEW_POLICY_DEMO, FORBIDDEN_IN_DEMO, "demo render/review blocks")
+    _assert_none_of(GENERATION_POLICY_DEMO + REVIEW_POLICY_DEMO, FORBIDDEN_IN_DEMO, "demo generation/review blocks")
 
 
 def test_placeholders_match_the_prompt_contract() -> None:
     assert SELECTION_POLICY_PLACEHOLDER == "{selection_policy}"
-    assert RENDER_POLICY_PLACEHOLDER == "{render_policy}"
+    assert GENERATION_POLICY_PLACEHOLDER == "{generation_policy}"
     assert REVIEW_POLICY_PLACEHOLDER == "{review_policy}"
 
 
@@ -178,17 +180,17 @@ def test_demo_assembly_has_no_novelty_requirement() -> None:
     assert "non-obvious" in _classify_assembly("strict_knowledge")
 
 
-def test_packaged_render_and_review_fixed_texts_carry_no_novelty_requirement() -> None:
-    render = RENDER_PROMPT.read_text(encoding="utf-8")
+def test_packaged_generation_and_review_fixed_texts_carry_no_novelty_requirement() -> None:
+    generation = GENERATION_PROMPT.read_text(encoding="utf-8")
     review = REVIEW_PROMPT.read_text(encoding="utf-8")
 
-    _assert_none_of(render, FORBIDDEN_IN_DEMO, "fixed render prompt")
+    _assert_none_of(generation, FORBIDDEN_IN_DEMO, "fixed generation prompt")
     _assert_none_of(review, FORBIDDEN_IN_DEMO, "fixed review prompt")
-    assert render.count(RENDER_POLICY_PLACEHOLDER) == 1
+    assert generation.count(GENERATION_POLICY_PLACEHOLDER) == 1
     assert review.count(REVIEW_POLICY_PLACEHOLDER) == 1
-    demo_render = render.replace(RENDER_POLICY_PLACEHOLDER, render_policy_block(True))
+    demo_generation = generation.replace(GENERATION_POLICY_PLACEHOLDER, generation_policy_block(True))
     demo_review = review.replace(REVIEW_POLICY_PLACEHOLDER, review_policy_block(True))
-    _assert_none_of(demo_render, FORBIDDEN_IN_DEMO, "demo render assembly")
+    _assert_none_of(demo_generation, FORBIDDEN_IN_DEMO, "demo generation assembly")
     _assert_none_of(demo_review, FORBIDDEN_IN_DEMO, "demo review assembly")
-    assert demo_render.count(RENDER_POLICY_DEMO) == 1 and RENDER_POLICY_NORMAL not in demo_render
+    assert demo_generation.count(GENERATION_POLICY_DEMO) == 1 and GENERATION_POLICY_NORMAL not in demo_generation
     assert demo_review.count(REVIEW_POLICY_DEMO) == 1 and REVIEW_POLICY_NORMAL not in demo_review

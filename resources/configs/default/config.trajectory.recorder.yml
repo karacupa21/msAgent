@@ -28,9 +28,17 @@ capture:
   graph_metadata: true
 
 output:
+  # Where the trajectory store lives:
+  #   workspace - one store per workspace, in its project state dir
+  #               (~/.msagent/state/projects/<project>/). Default.
+  #   shared    - one store for every workspace (~/.msagent/state/). Commands
+  #               run in a workspace (/trajectories, /skill-mine, exgraph) still
+  #               see only that workspace's threads; the skill daemon mines all
+  #               of them, each in the context of the workspace it came from.
+  # Switching scope does not move files that were already recorded.
+  scope: workspace
   # Directory for trajectory files. A relative path is resolved against the
-  # project state dir (~/.msagent/state/projects/<project>/); an absolute
-  # path is used as-is.
+  # root of the scope above; an absolute path is used as-is.
   directory: trajectories
   # File name per conversation thread. Available fields: {agent}, {thread_id}
   filename: "{agent}_{thread_id}.jsonl"

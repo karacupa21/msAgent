@@ -22,7 +22,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from msagent.trajectory_recorder.export import find_trajectory_file, resolve_trajectories_dir
+from msagent.trajectory_recorder.export import (
+    find_trajectory_file,
+    resolve_trajectories_dir,
+    workspace_filter,
+)
 from msagent.trajectory_recorder.model import Trajectory
 from msagent.trajectory_recorder.reader import load_trajectory
 
@@ -49,12 +53,17 @@ def load_source_trajectory(
     state_dir: Path | None = None,
     path: Path | None = None,
 ) -> tuple[Path, Trajectory]:
-    """Load one recorded trajectory by path or thread id."""
+    """Load one recorded trajectory by path or thread id.
+
+    In the shared trajectory store a thread id resolves among the threads of
+    ``working_dir`` (default: cwd) only, as for every per-workspace reader.
+    """
     if path is not None:
         source = Path(path)
         return source, load_trajectory(source)
     trajectories_dir = resolve_trajectories_dir(working_dir=working_dir, state_dir=state_dir)
-    source = find_trajectory_file(trajectories_dir, thread_id)
+    workspace = workspace_filter(working_dir)
+    source = find_trajectory_file(trajectories_dir, thread_id, workspace=workspace)
     if source is None:
         raise FileNotFoundError(
             f"No recorded trajectory for thread '{thread_id}' in {trajectories_dir}",

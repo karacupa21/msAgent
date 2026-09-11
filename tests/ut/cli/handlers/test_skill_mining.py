@@ -622,6 +622,74 @@ async def test_bad_flag_reports_usage_and_stops(mine) -> None:
     assert mine.spy.renderables == []
 
 
+# ------------------------------------------------------------ shared store
+
+
+@pytest.fixture
+def shared_mine(mine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The mining handler over the shared store (output.scope: shared)."""
+    config = tmp_path / "config.trajectory.recorder.yml"
+    config.write_text("output:\n  scope: shared\n", encoding="utf-8")
+    monkeypatch.setenv("MSAGENT_TRAJECTORY_CONFIG", str(config))
+    reset_config_cache()
+    mine.trajectories = module.initializer.app_paths.state_dir / "trajectories"
+    mine.trajectories.mkdir(parents=True)
+    return mine
+
+
+def _copy_in(trajectories: Path, thread_id: str, working_dir: Path) -> Path:
+    """The signals fixture recorded in ``working_dir`` under another thread id."""
+    target = _copy_as(trajectories, thread_id)
+    lines: list[str] = []
+    for raw in target.read_text(encoding="utf-8").splitlines():
+        event = json.loads(raw)
+        if event.get("event") == "recorder.attach":
+            event["working_dir"] = str(working_dir)
+        lines.append(json.dumps(event, ensure_ascii=False))
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def test_select_trajectories_keeps_targets_and_pool_in_the_workspace(shared_mine) -> None:
+    _copy_in(shared_mine.trajectories, "t-mine", shared_mine.root)
+    _copy_in(shared_mine.trajectories, "t-theirs", shared_mine.root / "elsewhere")
+    options = module.parse_mine_args(["--threads", "5"])
+
+    targets, pool = module.select_trajectories(
+        shared_mine.trajectories,
+        agent=AGENT,
+        options=options,
+        now=0.0,
+        workspace=shared_mine.root.resolve(),
+    )
+
+    assert [trajectory.thread_id for trajectory in targets] == ["t-mine"]
+    assert [trajectory.thread_id for trajectory in pool] == ["t-mine"]
+
+
+@pytest.mark.asyncio
+async def test_shared_store_mines_this_workspace_only(shared_mine) -> None:
+    _copy_in(shared_mine.trajectories, "t-mine", shared_mine.root)
+    _copy_in(shared_mine.trajectories, "t-theirs", shared_mine.root / "elsewhere")
+
+    await shared_mine.handler.handle(["--dry-run", "--threads", "5"])
+
+    assert shared_mine.spy.error == []
+    assert any("Selected the newest 1" in line for line in shared_mine.spy.info)
+    text = shared_mine.spy.rendered_text()
+    assert "t-mine" in text
+    assert "t-theirs" not in text
+
+
+@pytest.mark.asyncio
+async def test_shared_store_refuses_another_workspaces_thread(shared_mine) -> None:
+    _copy_in(shared_mine.trajectories, "t-theirs", shared_mine.root / "elsewhere")
+
+    await shared_mine.handler.handle(["--dry-run", "--thread", "t-theirs"])
+
+    assert any("No recorded trajectory" in line and "for workspace" in line for line in shared_mine.spy.warning)
+
+
 @pytest.mark.asyncio
 async def test_real_run_below_threshold_creates_no_llm(mine) -> None:
     # The LLM factory raises; a run whose threads all fail the gate must still
@@ -676,7 +744,7 @@ def _write_proposal(
         "episodes": [],
         "candidates": [{"title": "t"}],
         "model": "fake-model",
-        "prompt_variants": {"classify": "c", "render": "r"},
+        "prompt_variants": {"classify": "c", "generate": "g"},
         "features_version": 2,
         "generated_at": "2026-09-04T10:00:00+00:00",
         "category": category,
@@ -1027,7 +1095,7 @@ async def test_review_root_resolves_relative_output_dir_under_working_dir(review
 # ------------------------------------------------------------------ real run
 
 CLASSIFY_TEMPLATE = "Library:\n{skill_library}\n\nPolicy:\n{selection_policy}\n\nBundle:\n{evidence_bundle}\n"
-RENDER_TEMPLATE = "Policy:\n{render_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
+GENERATION_TEMPLATE = "Policy:\n{generation_policy}\n\nCandidates:\n{candidates}\n\nExisting:\n{existing_skill}\n"
 REVIEW_TEMPLATE = (
     "Policy:\n{review_policy}\n\nSkill:\n{skill_md}\n\nCandidates:\n{candidates}\n\n"
     "Evidence:\n{evidence}\n\nExisting:\n{existing_skill}\n"
@@ -1130,7 +1198,7 @@ def scripted(mine, monkeypatch: pytest.MonkeyPatch):
     """The mining fixture with the LLM stages wired to a scripted fake."""
 
     async def fake_stage_prompt(_self, _root, _cfg, stage):
-        templates = {"classify": CLASSIFY_TEMPLATE, "render": RENDER_TEMPLATE, "review": REVIEW_TEMPLATE}
+        templates = {"classify": CLASSIFY_TEMPLATE, "generate": GENERATION_TEMPLATE, "review": REVIEW_TEMPLATE}
         return templates[stage], f"packaged/{stage}/prompt_v1.md"
 
     monkeypatch.setattr(
@@ -1176,9 +1244,9 @@ async def test_real_run_writes_one_proposal_per_thread(scripted) -> None:
     )
     assert provenance["model"] == "fake-model"
     assert provenance["thread_ids"][0] == SIGNALS_THREAD
-    assert provenance["provenance_version"] == 4
+    assert provenance["provenance_version"] == 5
     assert set(provenance["candidates"][0]["evidence_refs"]) <= set(provenance["evidence_shown"])
-    assert provenance["render_evidence"] == {"c1": ["ev1", "ev2"]}
+    assert provenance["generation_evidence"] == {"c1": ["ev1", "ev2"]}
     # The ordinary policy is recorded as such.
     assert provenance["policy"] == {
         "requested": "strict_knowledge",
@@ -1191,7 +1259,7 @@ async def test_real_run_writes_one_proposal_per_thread(scripted) -> None:
     assert any("1 proposals" in line for line in scripted.spy.success)
     # The per-thread header names the gate decision that let it through.
     assert any("incidents" in line for line in scripted.spy.info)
-    # Three calls for one thread: classify, render and the quality review.
+    # Three calls for one thread: classify, generate and the quality review.
     assert len(scripted.llm.payloads) == 3
     # The default max_plans (3) bounds the run at min(max_llm_calls, 2 + 2 + 6 * 3) calls per thread.
     bound = module.llm_call_bound(1, 3, max_llm_calls=16)
@@ -1210,10 +1278,10 @@ async def test_real_run_writes_nothing_on_a_nothing_verdict(scripted) -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_run_render_transport_error_is_a_render_error(scripted) -> None:
+async def test_real_run_generation_transport_error_is_a_generation_error(scripted) -> None:
     _copy(scripted.trajectories, SIGNALS, SIGNALS_THREAD)
-    # One scripted reply, but the pipeline needs two: the render call raises,
-    # which is a render error of that plan, not a failed thread.
+    # One scripted reply, but the pipeline needs two: the generation call raises,
+    # which is a generation error of that plan, not a failed thread.
     scripted.script(_classify_reply(_candidate(["ev1", "ev2"])))
 
     await scripted.handler.handle([])
@@ -1223,10 +1291,10 @@ async def test_real_run_render_transport_error_is_a_render_error(scripted) -> No
     # Every thread lands in exactly one category of the summary.
     summary = next(line for line in scripted.spy.warning if line.startswith("Mined "))
     assert summary == (
-        "Mined 1 threads: 0 proposals, 0 skipped by the gate, 0 nothing to save, 1 rejected at render, 0 failed"
+        "Mined 1 threads: 0 proposals, 0 skipped by the gate, 0 nothing to save, 1 rejected at generation, 0 failed"
     )
     assert not any(line.startswith("Mined ") for line in scripted.spy.error)
-    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
+    assert "Plans: 1 generation errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
     assert not (scripted.root / "skills" / ".proposals").exists()
 
 
@@ -1301,7 +1369,7 @@ async def test_real_run_first_plan_error_does_not_stop_second(scripted) -> None:
 
     await scripted.handler.handle([])
 
-    # classify, the failed render, the second render and its review; the failed call still counts.
+    # classify, the failed generation call, the second generation call and its review; the failed call still counts.
     assert len(scripted.llm.payloads) == 4 and scripted.llm.replies == []
     (plan_error,) = [line for line in scripted.spy.error if line.startswith("plan ")]
     assert "Generated source debugging" in plan_error and "transport down" in plan_error
@@ -1310,9 +1378,9 @@ async def test_real_run_first_plan_error_does_not_stop_second(scripted) -> None:
     assert not (proposals / GENERATED_NAME).exists()
     summary = next(line for line in scripted.spy.warning if line.startswith("Mined "))
     assert summary == (
-        "Mined 1 threads: 1 proposals, 0 skipped by the gate, 0 nothing to save, 0 rejected at render, 0 failed"
+        "Mined 1 threads: 1 proposals, 0 skipped by the gate, 0 nothing to save, 0 rejected at generation, 0 failed"
     )
-    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
+    assert "Plans: 1 generation errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
 
 
 @pytest.mark.asyncio
@@ -1326,7 +1394,7 @@ async def test_real_run_defers_plans_over_max_plans(scripted) -> None:
 
     assert len(scripted.llm.payloads) == 3 and scripted.llm.replies == []
     assert "Deferred plan: create: Profile before summary — max_plans 1 reached" in scripted.spy.info
-    assert "Plans: 0 render errors, 0 rejected targets, 1 deferred" in scripted.spy.info
+    assert "Plans: 0 generation errors, 0 rejected targets, 1 deferred" in scripted.spy.info
     proposals = scripted.root / "skills" / ".proposals" / SIGNALS_THREAD
     assert sorted(p.name for p in proposals.iterdir()) == [GENERATED_NAME]
 

@@ -26,7 +26,7 @@ Rules:
   retries inside the client are invisible here. Past the limit the wrapper
   raises :class:`LlmBudgetExhausted` and nothing is written for that plan.
 * The per-thread ceiling is classify (2: call + corrective retry), the
-  optional expand round (2) and 6 per plan (render 2, review 2, revise 1,
+  optional expand round (2) and 6 per plan (generate 2, review 2, revise 1,
   review 1); :func:`llm_call_bound` caps it by the configured limit.
 * :class:`ContextBudget` bounds the whole prompt text (template + library +
   policy + evidence + existing skill) by the model context window: 4 chars
@@ -45,7 +45,7 @@ from typing import Any
 CLASSIFY_CALLS = 2
 # the expand_context_once round (same shape)
 EXPAND_CALLS = 2
-# render 2 (first + validator correction) + review 2 (first + parse retry) + revise 1 + review 1
+# generate 2 (first + validator correction) + review 2 (first + parse retry) + revise 1 + review 1
 PLAN_CALLS = 6
 CHARS_PER_TOKEN = 4
 USABLE_RATIO = 0.6

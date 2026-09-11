@@ -31,21 +31,23 @@ class ThemedConsole:
         """Print with theme-aware styling."""
         self.console.print(*args, style=style, **kwargs)
 
+    # Status helpers mark the message kind by color alone: the whole line takes the
+    # semantic style; highlighting is off so numbers and paths keep that color.
     def print_error(self, content: str):
         """Print error message."""
-        self.console.print(f"[error]\u274c[/error] {content}")
+        self.console.print(content, style="error", highlight=False)
 
     def print_warning(self, content: str):
         """Print warning message."""
-        self.console.print(f"[warning]\u26a0\ufe0f[/warning] {content}")
+        self.console.print(content, style="warning", highlight=False)
 
     def print_success(self, content: str):
         """Print success message."""
-        self.console.print(f"[success]\u2705[/success] {content}")
+        self.console.print(content, style="success", highlight=False)
 
     def print_info(self, content: str):
         """Print neutral informational message."""
-        self.console.print(f"[info]\u2139\ufe0f[/info] {content}")
+        self.console.print(content, style="info", highlight=False)
 
     def clear(self):
         """Clear the console."""

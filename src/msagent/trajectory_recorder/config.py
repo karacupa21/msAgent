@@ -45,6 +45,13 @@ class CaptureLevel(str, Enum):
     LLM_IO = "llm_io"
 
 
+class StoreScope(str, Enum):
+    """Where trajectory files live: a store per workspace, or one for all of them."""
+
+    WORKSPACE = "workspace"
+    SHARED = "shared"
+
+
 class CaptureConfig(BaseModel):
     level: CaptureLevel = Field(default=CaptureLevel.MESSAGES, description="What to capture")
     tool_starts: bool = Field(default=True, description="Record tool.start events with inputs")
@@ -53,9 +60,13 @@ class CaptureConfig(BaseModel):
 
 
 class OutputConfig(BaseModel):
+    scope: StoreScope = Field(
+        default=StoreScope.WORKSPACE,
+        description="workspace: a store per project state dir; shared: one for all",
+    )
     directory: str = Field(
         default="trajectories",
-        description="Trajectory files directory; relative paths resolve against the project state dir",
+        description="Store directory; a relative path resolves against the scope root",
     )
     filename: str = Field(
         default="{agent}_{thread_id}.jsonl",
@@ -86,6 +97,29 @@ class TrajectoryRecorderConfig(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.enabled and self.capture.level != CaptureLevel.OFF
+
+    @property
+    def is_shared(self) -> bool:
+        return self.output.scope == StoreScope.SHARED
+
+
+def store_dir(config: TrajectoryRecorderConfig, *, state_dir: Path | None) -> Path:
+    """Directory holding the trajectory files under the configured scope.
+
+    An absolute ``output.directory`` is used as-is in both scopes. A relative one
+    resolves against ``<MSAGENT_HOME>/state`` in the shared scope and against the
+    project ``state_dir`` in the workspace scope, which then must be given.
+    """
+    directory = Path(config.output.directory).expanduser()
+    if directory.is_absolute():
+        return directory
+    if config.is_shared:
+        from msagent.core.paths import AppPaths
+
+        return AppPaths.resolve().state_dir / directory
+    if state_dir is None:
+        raise ValueError("the workspace trajectory scope needs a project state dir")
+    return Path(state_dir) / directory
 
 
 _cache_lock = threading.Lock()

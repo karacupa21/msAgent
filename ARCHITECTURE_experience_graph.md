@@ -76,6 +76,11 @@ users on one install get several graphs if they use several working
 dirs. Sharing a project folder shares the graph. There is no
 process-wide singleton and no company-wide dump of raw cases.
 
+The trajectory recorder's `output.scope: shared` (one trajectory store
+for every workspace) does not change this: graphs stay under the project
+state, and `load_source_trajectory` / `build --all` read only the
+threads recorded in their `--working-dir` (default: cwd).
+
 A later optional `MSAGENT_EXGRAPH_ROOT` may point at a **read-mostly
 overlay** of recipes + accepted SkillDocs. That is not P1.1.
 

@@ -2,7 +2,9 @@
 
 Status: implemented (`src/msagent/trajectory_recorder/`), schema version 1. Typed reader (`model.py`,
 `reader.py`) and the `ignore_agent` fix landed on 2026-09-04; `Turn.approvals` became typed `Approval`
-records (keeping the event `seq`) the same day for the skill-evolver feature extraction.
+records (keeping the event `seq`) the same day for the skill-evolver feature extraction. The store scope
+(`output.scope: workspace | shared`, section 5) and the per-workspace reader filter (section 9) landed on
+2026-09-11.
 
 ## 1. Purpose
 
@@ -57,7 +59,8 @@ src/msagent/trajectory_recorder/
     __init__.py     Package docstring only. Deliberately imports nothing, so lightweight
                     consumers (export CLI, reader) do not pull langchain into the process.
     config.py       Pydantic schema of config.trajectory.recorder.yml + cached loader
-                    (env path -> user config dir -> packaged default -> built-in defaults).
+                    (env path -> user config dir -> packaged default -> built-in defaults);
+                    store_dir() maps output.scope / output.directory to the store directory.
     serialize.py    JSON-safe conversion, full message serialization, redaction, truncation.
     recorder.py     TrajectoryRecorder: thread-safe append-only JSONL writer with the
                     event envelope, size cap and error-once logging.
@@ -69,11 +72,15 @@ src/msagent/trajectory_recorder/
     model.py        Typed view of one file: Trajectory -> Turn -> AiMessage / ToolCall
                     (slots dataclasses, stdlib only).
     reader.py       Builds the model from JSONL: iter_events, extract_message_text,
-                    load_trajectory, load_trajectories. stdlib only, no langchain — the
-                    entry point for skill_evolver and any other analysis (section 9).
+                    load_trajectory, load_trajectories (optionally narrowed to one
+                    workspace via workspace_key / file_workspace). stdlib only, no
+                    langchain — the entry point for skill_evolver and any other
+                    analysis (section 9).
     export.py       Markdown/json renderers + standalone CLI
                     (python -m msagent.trajectory_recorder.export); reuses
-                    reader.iter_events and reader.extract_message_text.
+                    reader.iter_events and reader.extract_message_text;
+                    resolve_trajectories_dir / workspace_filter tell a reader where
+                    its files are and which of them are its own.
 
 resources/configs/default/
     config.trajectory.recorder.yml   Shipped default configuration.
@@ -83,6 +90,8 @@ tests/ut/trajectory_recorder/
                        check that importing reader loads no langchain/langgraph module.
     test_callback.py   tool events delivered through langchain's CallbackManager
                        (the ignore_agent gate) and a recorder -> reader round-trip.
+    test_store_scope.py  both store scopes through the real hooks, the canonical
+                       working_dir, the per-workspace readers and the export CLI.
 tests/fixtures/trajectories/*.jsonl
     Seven hand-written schema-v1 files (31-35 lines each): normal session with a subagent,
     orphan tool.start, missing turn.end, malformed lines, recorder.limit, tool.result
@@ -133,13 +142,28 @@ Two properties make subagent capture work without touching deepagents:
 
 ## 5. Storage layout and file format
 
-Files live next to the other project-scoped state:
+`output.scope` selects one of two layouts (added 2026-09-11; `workspace` is the default and the only
+layout of every earlier file):
 
 ```
-~/.msagent/state/projects/<project-slug>-<sha12>/trajectories/{agent}_{thread_id}.jsonl
+workspace: ~/.msagent/state/projects/<project-slug>-<sha12>/trajectories/{agent}_{thread_id}.jsonl
+shared:    ~/.msagent/state/trajectories/{agent}_{thread_id}.jsonl
 ```
 
-(`MSAGENT_HOME` overrides `~/.msagent`; directory and filename template are configurable.)
+(`MSAGENT_HOME` overrides `~/.msagent`; directory and filename template are configurable; an absolute
+`output.directory` is used as-is in both scopes. Both roots are resolved by `config.store_dir`.)
+
+- **workspace** — files live next to the other project-scoped state; the directory itself is the
+  workspace boundary.
+- **shared** — one flat directory for every workspace. Thread ids are uuid4, so file names do not
+  collide and `EvidenceRef.source` (the file name) stays unique. A file belongs to the workspace its
+  `recorder.attach.working_dir` names — the only in-file record of the origin. Since 2026-09-11 the
+  hooks write it as an absolute canonical path (`Path.expanduser().resolve()`), so a relative `-w`
+  can no longer make a file unattributable; readers compare it through `reader.workspace_key`
+  (resolved + `os.path.normcase`, the identity `ProjectPaths` hashes into the project id).
+  Per-workspace readers see only their own workspace's files (section 9); the skill daemon reads all of
+  them, each for its origin project (`ARCHITECTURE_skill_daemon.md`). Switching the scope moves no
+  file: per-workspace files stay in the project dirs and are visible again under `scope: workspace`.
 
 Each line is one event. Envelope fields present on **every** event:
 
@@ -199,7 +223,8 @@ startup — defaults are used and a warning is logged. The config is cached per 
 | `capture.tool_starts` | `true` | emit `tool.start` in addition to `tool.result` |
 | `capture.retries` | `true` | emit `llm.retry` |
 | `capture.graph_metadata` | `true` | attach `graph` (langgraph node/step/namespace) to events |
-| `output.directory` | `trajectories` | relative → resolved against the project state dir; absolute used as-is |
+| `output.scope` | `workspace` | `workspace`: a store per project state dir; `shared`: one store for every workspace under `<MSAGENT_HOME>/state/` (section 5) |
+| `output.directory` | `trajectories` | relative → resolved against the scope root (the project state dir, or `<MSAGENT_HOME>/state` when shared); absolute used as-is |
 | `output.filename` | `{agent}_{thread_id}.jsonl` | per-thread file name template |
 | `limits.max_field_chars` | `0` (unlimited) | per-string truncation |
 | `limits.max_file_mb` | `0` (unlimited) | hard per-file cap (emits `recorder.limit`, then stops) |
@@ -267,7 +292,7 @@ The recorder does not replace anything; it adds the processing-grade layer:
 CLI (stdlib-only import path, safe to run anywhere):
 
 ```
-python -m msagent.trajectory_recorder.export list   [-w DIR | --state-dir DIR]
+python -m msagent.trajectory_recorder.export list   [-w DIR | --state-dir DIR] [--all-workspaces]
 python -m msagent.trajectory_recorder.export show   --thread <id> [--max-chars N]
 python -m msagent.trajectory_recorder.export export --thread <id> --format json|jsonl|md [-o FILE]
 ```
@@ -275,8 +300,20 @@ python -m msagent.trajectory_recorder.export export --thread <id> --format json|
 Low-level library: `iter_numbered_events(path, malformed=...)` (yields `(line, event)` pairs, the
 1-based physical line being the event's `EvidenceRef.line`), `iter_events(path, malformed=...)` and
 `extract_message_text(message)` in `msagent.trajectory_recorder.reader` (the last two re-exported by
-`export`); `list_trajectories(dir)`, `find_trajectory_file(dir, thread_id)`, `render_markdown(events)`
-in `msagent.trajectory_recorder.export`.
+`export`); `list_trajectories(dir, *, workspace=None)`, `find_trajectory_file(dir, thread_id, *,
+workspace=None)`, `render_markdown(events)` in `msagent.trajectory_recorder.export`.
+
+**Workspace filter (shared store).** `resolve_trajectories_dir()` returns the one shared directory
+whichever workspace asks, so every per-workspace reader narrows it with
+`export.workspace_filter(working_dir)` — `None` under `scope: workspace` (no filter, nothing changes),
+the resolved working dir under `scope: shared` — passed as `workspace=` to `load_trajectories`,
+`list_trajectories` and `find_trajectory_file`. The filter compares the `working_dir` of each file's
+first event by `reader.workspace_key` (`reader.file_workspace(path)` reads just that line); a file with
+no event, or without an absolute `working_dir`, belongs to no workspace, and a relative filter argument
+is a `ValueError`. Callers: `/trajectories`, `/skill-mine`, `/direct-skill-generation`, the exgraph CLI
+and the daemon's cross-session pool. The export CLI filters by `--working-dir` (default: cwd;
+`--state-dir` does not pick a store in the shared scope) and reads the whole store with
+`--all-workspaces`, where `list` also prints each file's `workspace=`.
 
 ### Typed reader (`msagent.trajectory_recorder.reader`)
 
@@ -376,22 +413,43 @@ Mapping to the target use cases:
   lines (appends are atomic-ish per line, and `rec` disambiguates writers), but this is not a supported
   scenario. Analysis does not depend on `rec`: the typed reader identifies events by their physical
   line (`EvidenceRef`), which a restart cannot repeat.
+- Shared store (`output.scope: shared`): a file is attributed to a workspace only through its
+  `recorder.attach.working_dir`. A filtered `load_trajectories` still peeks the first event of **every**
+  file in the directory, so a file created a moment ago with no event yet makes it fail loudly
+  (`TrajectoryReadError`) — in the shared store that can be another workspace's fresh session, not only
+  this project's; the daemon defers the tick instead (`PoolNotReady`). Files recorded before 2026-09-11
+  may carry a relative `working_dir` (a relative `-w`); they belong to no workspace, which only matters
+  if such files are copied into the shared store by hand. Switching `output.scope` moves no file.
 
 ## 12. Verification
 
 Unit tests (`tests/ut/trajectory_recorder/`, run with `pytest tests/ut/trajectory_recorder -q`):
 
-- `test_reader.py` — 18 test functions (26 cases) over the hand-written fixtures in
+- `test_reader.py` — 24 test functions (31 cases) over the hand-written fixtures in
   `tests/fixtures/trajectories/` plus inline files: header fields, both turn outcomes, all three
   `tool.result` shapes, `tool.error`, string / list / null tool inputs, subagent attribution, retries /
   approvals / compressions, late events after `turn.end`, orphan spans, missing `turn.end` (closed by the
   next `turn.start` and by EOF), a second `recorder.attach`, malformed lines with exact line numbers,
   `recorder.limit`, results without starts, `extract_message_text` block handling, loud failures
   (`v != 1`, bad `turn.end` status, missing `span_id`, empty file), directory loading (mtime order,
-  filters, `limit`), `export` reusing the reader helpers, and a subprocess check that importing `reader`
-  loads no `langchain*` / `langgraph*` module. `reader.py` line coverage: 100%.
+  filters, `limit`), the workspace filter (`workspace_key`, `file_workspace`, `load_trajectories` /
+  `list_trajectories` / `find_trajectory_file` with `workspace=`, `limit` after the filter, an event-less
+  file owned by no workspace), `export` reusing the reader helpers, and a subprocess check that importing
+  `reader` loads no `langchain*` / `langgraph*` module. `reader.py` line coverage: 100% (re-measured
+  2026-09-11).
 - `test_callback.py` — tool events delivered through a real `langchain_core` `CallbackManager` (the
   `ignore_agent` gate) and read back by `load_trajectory`.
+- `test_store_scope.py` — both store scopes end to end through `hooks.instrument_config` /
+  `finish_turn`: the workspace scope still writes into the project state dir, the shared scope writes
+  two workspaces into one `<MSAGENT_HOME>/state/trajectories/`, a relative `working_dir` is recorded
+  absolute; `store_dir` for every scope × relative/absolute directory; the packaged YAML keeps
+  `scope: workspace`; the per-workspace readers and the export CLI (`--all-workspaces`).
+
+Consumers of the shared store are tested where they live: `/trajectories`
+(`tests/ut/cli/handlers/test_trajectories_handler.py`), `/skill-mine`
+(`tests/ut/cli/handlers/test_skill_mining.py`), the daemon's single-pass attribution
+(`tests/ut/skill_evolver/test_daemon_discovery.py`) and a shared-store tick that mines a thread once,
+under its origin project, from the origin workspace's pool (`tests/ut/skill_evolver/test_daemon_runner.py`).
 
 Original bring-up (langchain-core / langgraph / deepagents 0.4.8): `py_compile` of all new and patched
 modules; import of the patched CLI modules; a functional smoke test driving `instrument_config` →

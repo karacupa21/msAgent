@@ -82,14 +82,20 @@ exists once cannot drift between the callers.
     ├── skill-daemon/                         # the daemon's own state, shared by all projects
     │   ├── ledger.sqlite3                    # what has been mined (section 6)
     │   └── tick.lock                         # one tick at a time (section 8)
+    ├── trajectories/                         # input, read-only — output.scope: shared only
     └── projects/<slug>-<sha12>/
-        ├── trajectories/                     # input, read-only
+        ├── trajectories/                     # input, read-only — output.scope: workspace (default)
         └── skill-evolver/
             ├── decisions/                    # the pipeline's own reports, command: "skill-daemon"
             └── daemon-inbox.json             # the CLI banner reads this (section 9)
 ```
 
 Proposals land where the interactive command puts them: `<output_root>/.proposals/<thread>/<name>/`.
+
+With the recorder's `output.scope: shared` (ARCHITECTURE_trajectory_recorder.md, section 5) every
+project resolves the one `state/trajectories/` directory. Everything else stays per project: a thread
+is attributed to the project its `recorder.attach.working_dir` names (section 7), so its report, inbox
+entry, ledger row and proposals are the ones the workspace scope would have produced.
 
 ## 5. Configuration (schema_version 1)
 
@@ -179,6 +185,20 @@ Projects are enumerated from `<home>/state/projects/*/project.json`, whose `work
 what the pipeline needs to resolve skills and the output root. Candidates are grouped by
 **(project, agent)**: both the skill catalogue and the cross-session pool are agent-scoped.
 
+**Shared store.** Under the recorder's `output.scope: shared` every project resolves the same
+directory, and scanning it per project would parse each file once per project and mine each thread
+once per project. `discovery.iter_shared_scans` reads the store once per tick instead: `preflight`
+over the whole store (one empty file defers the whole tick, section 8), then each file goes to the
+project whose working directory its first event (`recorder.attach.working_dir`) names, compared by
+`reader.workspace_key`. A file whose origin is unknown, relative, or not among this tick's projects
+(out of `scope.projects`, not selected by `--project`, no `project.json` any more) is logged and left
+alone; every project still gets a `ScanResult`, so its inbox is stamped. The per-file rules are the
+same `_examine` as `scan_project`. The cross-session pool is narrowed to the origin workspace
+(`_pool_and_targets(..., workspace=)`), the pool `/skill-mine` builds in that workspace, so a
+background verdict equals an interactive one. Each tick reloads the recorder config
+(`load_trajectory_config(force_reload=True)`), so a `--watch` process sees a scope change without a
+restart.
+
 ## 8. Safety of reading files another process is writing
 
 Three distinct hazards, with three different answers:
@@ -250,7 +270,7 @@ Notes on the decisions that are easy to get wrong:
   makes a background verdict distinguishable from one a user asked for.
 - **The results come from the decision report.** `_mine_thread` returns a `PlanTally`; the
   proposal paths and the real LLM cost come from the report the pipeline already writes
-  (REPORT_VERSION 1). Reading an existing contract beat changing the pipeline to return more.
+  (REPORT_VERSION 2). Reading an existing contract beat changing the pipeline to return more.
 
 ## 10. Notification
 

@@ -88,7 +88,7 @@ def test_packaged_default_is_schema_v2_with_spec_defaults(tmp_path: Path) -> Non
     assert cfg.output_dir is None
     assert cfg.contract_version == 2
     assert all(cfg.prompt_for(stage) == "prompt_v2.md" for stage in STAGES)
-    assert STAGES == ("classify", "render", "review")
+    assert STAGES == ("classify", "generate", "review")
     assert cfg.save_decision_report is True
     assert cfg.save_evidence_text is False
     assert cfg.save_rejected_drafts is True
@@ -275,8 +275,8 @@ def test_v1_collects_every_problem_at_once(tmp_path: Path) -> None:
             ("prompts.classify", "must be a file name without path separators or '..', got '../x.md'"),
         ),
         (
-            "schema_version: 2\nprompts:\n  render: /abs/x.md\n",
-            ("prompts.render", "must be a file name without path separators or '..', got '/abs/x.md'"),
+            "schema_version: 2\nprompts:\n  generate: /abs/x.md\n",
+            ("prompts.generate", "must be a file name without path separators or '..', got '/abs/x.md'"),
         ),
         ("schema_version: 2\nprompts:\n  review: 3\n", ("prompts.review", "must be text, got 3")),
         (
@@ -478,7 +478,7 @@ def test_requested_record_has_v2_shape_and_provenance(tmp_path: Path) -> None:
     assert record["prompts"] == {
         "contract_version": 2,
         "classify": "prompt_v1.md",
-        "render": "prompt_v1.md",
+        "generate": "prompt_v1.md",
         "review": "prompt_v1.md",
     }
     assert record["demo_mode"] is True
