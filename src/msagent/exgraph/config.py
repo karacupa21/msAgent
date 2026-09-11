@@ -60,7 +60,11 @@ class SkillScanConfig(BaseModel):
 
 class SimilarConfig(BaseModel):
     min_tools: float = Field(default=0.5, description="Minimum tool-path Jaccard")
-    min_tokens: float = Field(default=0.25, description="Minimum user-text token Jaccard")
+    min_tokens: float = Field(default=0.25, description="Minimum user-text score (BM25 or Jaccard)")
+    text_backend: str = Field(
+        default="bm25",
+        description="bm25 = skill_evolver.retrieval; jaccard = legacy token sets",
+    )
 
 
 class InsightConfig(BaseModel):

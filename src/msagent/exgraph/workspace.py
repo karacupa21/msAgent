@@ -130,10 +130,16 @@ def rebuild_overlay(
         cfg = load_exgraph_config()
         min_tools = cfg.similar.min_tools
         min_tokens = cfg.similar.min_tokens
+        text_backend = cfg.similar.text_backend
         min_support = cfg.insight.min_support
     except Exception:
-        min_tools, min_tokens, min_support = 0.5, 0.25, 2
-    for edge in similar_edges(graph_list, min_tools=min_tools, min_tokens=min_tokens):
+        min_tools, min_tokens, min_support, text_backend = 0.5, 0.25, 2, "bm25"
+    for edge in similar_edges(
+        graph_list,
+        min_tools=min_tools,
+        min_tokens=min_tokens,
+        text_backend=text_backend,
+    ):
         edges[edge.id] = edge.to_dict()
     extra_nodes, extra_edges = insight_nodes(
         list(nodes.values()), graph_list, min_support=min_support

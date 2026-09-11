@@ -79,3 +79,39 @@ def test_accuracy_is_not_similar_to_profiler() -> None:
         min_tokens=0.1,
     )
     assert pairs == []
+
+
+def test_bm25_matches_han_where_legacy_jaccard_does_not() -> None:
+    from msagent.exgraph.similar import tokenize as legacy_tokenize
+
+    left = _case("t1", "r1", "Profiler", "查找训练性能瓶颈", ["bash", "read_file"])
+    right = _case("t2", "r2", "Profiler", "分析训练任务的性能瓶颈", ["bash", "read_file"])
+    assert legacy_tokenize(left.x) == set() or not (
+        legacy_tokenize(left.x) & legacy_tokenize(right.x)
+    )
+    tools, tokens = pair_scores(left, right, text_backend="bm25")
+    assert tools == 1.0
+    assert tokens >= 0.25
+    j_tools, j_tokens = pair_scores(left, right, text_backend="jaccard")
+    assert j_tools == 1.0
+    assert j_tokens == 0.0
+
+
+def test_english_profiler_still_similar_under_bm25() -> None:
+    left = _case(
+        "thread-signals",
+        "run-1",
+        "Profiler",
+        "Profile the training run and find the bottleneck",
+        ["bash", "read_file"],
+    )
+    right = _case(
+        "thread-reuse",
+        "run-r1",
+        "Profiler",
+        "Profile the training run and find the kernel-level bottleneck",
+        ["bash", "read_file", "grep"],
+    )
+    tools, tokens = pair_scores(left, right, text_backend="bm25")
+    assert tools >= 0.5
+    assert tokens >= 0.25
