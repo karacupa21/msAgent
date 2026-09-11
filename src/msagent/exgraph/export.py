@@ -21,6 +21,7 @@
     python -m msagent.exgraph.export build --thread <id> [--outcome success|fail]
     python -m msagent.exgraph.export show --thread <id>
     python -m msagent.exgraph.export export --thread <id> --format json
+    python -m msagent.exgraph.export ab --path traj.jsonl -o report.md
 """
 
 from __future__ import annotations
@@ -223,12 +224,44 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ab(args: argparse.Namespace) -> int:
+    """Classify-input A/B for one trajectory. No LLM."""
+    from msagent.exgraph.ab import compare_trajectory, render_markdown
+    from msagent.exgraph.sources import load_source_trajectory
+
+    path = Path(args.path) if args.path else None
+    work = Path(args.working_dir) if args.working_dir else Path.cwd()
+    state = Path(args.state_dir) if args.state_dir else work / ".exgraph-ab"
+    state.mkdir(parents=True, exist_ok=True)
+    _src, trajectory = load_source_trajectory(
+        thread_id=args.thread or "",
+        working_dir=work,
+        state_dir=state,
+        path=path,
+    )
+    modes = tuple(part.strip() for part in str(args.modes).split(",") if part.strip())
+    report = compare_trajectory(trajectory, working_dir=work, state_dir=state, modes=modes)
+    text = render_markdown(report)
+    if args.output and args.output != "-":
+        dest = Path(args.output)
+        dest.write_text(text, encoding="utf-8")
+        print(f"Written to {dest}")
+    else:
+        print(text)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="msagent.exgraph.export",
         description="Build and inspect experience graphs from recorded trajectories",
     )
-    parser.add_argument("command", choices=["build", "show", "export", "viz"])
+    parser.add_argument("command", choices=["build", "show", "export", "viz", "ab"])
+    parser.add_argument(
+        "--modes",
+        default="episodes,hybrid",
+        help="Comma list for ab: episodes,hybrid,graph",
+    )
     parser.add_argument("-w", "--working-dir", default=None)
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("-t", "--thread", default=None, help="Thread id or unique prefix")
@@ -242,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command not in {"show", "viz"} and not args.thread and not args.path and not getattr(args, "all", False):
         parser.error("--thread, --path or --all is required")
+    if args.command == "ab":
+        return cmd_ab(args)
 
     if args.command == "build":
         if args.all:

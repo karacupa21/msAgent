@@ -1,6 +1,6 @@
 # Experience Graph — Architecture
 
-Status: P0–P2.1 + **P2.1b** (Insight.text via CountingLlm), schema version 3.
+Status: P0–P2.3 + **P2.2** classify A/B harness, schema version 3.
 Branch: `feature/experience-graph`.
 
 ## 1. Purpose
@@ -131,6 +131,10 @@ stays deterministic. Empty overlay / exhausted budget / kill switch /
 `insight.fill_llm: false` → structural Insight only. Daemon is a third
 `run_thread` caller; it inherits the hook. FEATURES_VERSION is 5
 (evolver-owned).
+
+P2.2: `python -m msagent.exgraph.export ab` compares classify *input*
+under evidence_mode values. No LLM, no new node types. Full proposal
+A/B is `/skill-mine` twice with `MSAGENT_EXGRAPH_EVIDENCE_MODE`.
 
 ## 8. Later
 
