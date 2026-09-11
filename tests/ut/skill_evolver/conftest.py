@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -51,3 +52,13 @@ class FakeLLM:
 @pytest.fixture
 def fake_llm_cls() -> type[FakeLLM]:
     return FakeLLM
+
+
+@pytest.fixture(autouse=True)
+def reset_daemon_config_cache() -> Iterator[None]:
+    """The daemon config is cached per process; keep it from leaking between tests."""
+    from msagent.skill_evolver.daemon.config import reset_config_cache
+
+    reset_config_cache()
+    yield
+    reset_config_cache()

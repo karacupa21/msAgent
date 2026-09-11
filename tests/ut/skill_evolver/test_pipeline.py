@@ -183,6 +183,7 @@ REPORT_KEYS = {
     "stop_message",
     "failed",
     "evidence_text_file",
+    "rejected_draft_files",
 }
 
 
@@ -453,7 +454,7 @@ async def test_context_budget_cuts_bundle_once_then_classifies(tmp_path: Path, f
 
     result = await harness.thread(thread)
 
-    assert [stats["max_chars"] for stats in result.bundle_stats] == [30000, room]
+    assert [stats["max_chars"] for stats in result.bundle_stats] == [60000, room]
     assert result.bundle_stats[1]["chars"] <= room and result.bundle_stats[1]["excluded"] > 0
     # Two error_recovery exclusions after the cut are one code rejection.
     assert result.bundle_stats[1]["excluded_kinds"] == ["retry_loop", "error_recovery", "error_recovery"]
@@ -594,7 +595,7 @@ async def test_expand_is_not_retried_when_the_cut_bundle_shows_no_new_context(tm
     assert [(s.stage, s.status, s.detail) for s in result.stages if s.stage == "expand"] == [
         ("expand", "skipped", "no new context fits the model context")
     ]
-    assert [stats["max_chars"] for stats in result.bundle_stats] == [30000, 30000, room]
+    assert [stats["max_chars"] for stats in result.bundle_stats] == [60000, 60000, room]
     assert result.bundle_stats[1]["fragments"] > result.bundle_stats[0]["fragments"]
     assert result.bundle_stats[2]["fragments"] == result.bundle_stats[0]["fragments"]
     (warning,) = harness.sink.warning
@@ -746,6 +747,39 @@ async def test_quality_review_blocks_after_one_correction(tmp_path: Path, fake_l
     assert not (tmp_path / "skills").exists()
     (report,) = harness.reports()
     assert report["quality_review"][0]["verdict"] == "fail" and report["plans"]["render_errors"] == 1
+    # The first review's findings survive the failed correction, and the corrected draft is
+    # kept next to the report — in the private state, never under skills/.
+    assert report["quality_review"][0]["initial_issues"] == ["unsupported_addition: the evidence shows no --jobs flag"]
+    assert report["quality_review"][0]["corrected"] is False
+    (draft_name,) = report["rejected_draft_files"]
+    draft = result.report_path.with_name(draft_name)
+    assert result.rejected_draft_paths == [draft]
+    assert draft.name.endswith(".draft-1-create-generated-source-debugging.rejected.md")
+    text = draft.read_text(encoding="utf-8")
+    assert text.startswith(VALID_SKILL.strip()) and text.rstrip().endswith("never a proposal -->")
+    assert "quality_review_failed" in text
+
+
+@pytest.mark.asyncio
+async def test_rejected_draft_is_not_kept_when_disabled(tmp_path: Path, fake_llm_cls) -> None:
+    thread = _thread()
+    harness = _Harness(
+        tmp_path,
+        fake_llm_cls,
+        _classify_reply(_candidate(_refs(thread))),
+        VALID_SKILL,
+        REVIEW_FAIL,
+        VALID_SKILL,
+        REVIEW_FAIL,
+        cfg=DirectSkillGenerationConfig(save_rejected_drafts=False),
+    )
+
+    result = await harness.thread(thread)
+
+    assert result.tally.render_errors == 1 and result.rejected_draft_paths == []
+    (report,) = harness.reports()
+    assert report["rejected_draft_files"] == []
+    assert list(result.report_path.parent.glob("*.rejected.md")) == []
 
 
 @pytest.mark.asyncio
@@ -1023,7 +1057,7 @@ def test_bundle_preview_lines_for_a_demo_thread() -> None:
     lines = module.bundle_preview(thread, rules)
 
     assert lines[0].startswith("bundle: 7 fragments, ") and lines[0].endswith(
-        "(cap 30000); episodes shown 1, trimmed 0, excluded 0"
+        "(cap 60000); episodes shown 1, trimmed 0, excluded 0"
     )
     assert lines[1:] == [
         "observed_procedure: read_file → bash → bash (7 events)",

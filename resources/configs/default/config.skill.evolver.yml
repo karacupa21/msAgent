@@ -8,7 +8,7 @@ gate:
   min_evidence_score: 1.0           # evidence score a thread needs before the LLM is called; demo_mode bypasses it (demo_override)
 evidence:
   excerpt_max_chars: 1000           # longest cut of one recorded event shown in the bundle
-  bundle_max_chars: 30000           # bundle size; the model context window is checked separately at run time
+  bundle_max_chars: 60000           # bundle size (30000 cut the error_recovery blocks of SQL-heavy sessions); the model context window is checked separately at run time
   surrounding_events: 2             # neighbours added on each side by expand_context_once
   cross_session_limit: 20           # newest trajectories of the agent mined for repeated procedures
 on_nothing:
@@ -26,3 +26,4 @@ prompts:
 diagnostics:
   save_decision_report: true        # <project state>/skill-evolver/decisions/<thread>-<utc>.json, also when nothing is saved
   save_evidence_text: false         # additionally store the evidence bundle text next to the report
+  save_rejected_drafts: true        # keep the SKILL.md draft of a refused plan next to the report (<stem>.draft-N-<plan>.rejected.md)

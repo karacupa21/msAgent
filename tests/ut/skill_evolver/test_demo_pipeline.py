@@ -200,9 +200,14 @@ def _ai_claim(events: list[dict[str, Any]]) -> list[str]:
 
 
 def _error_output(events: list[dict[str, Any]]) -> list[str]:
-    """The sum call keeps status ok but its output is a traceback."""
+    """The check call keeps status ok but its output is a traceback.
+
+    It is the last call on purpose: since v5 a failure inside an ok result that a later ok
+    call of the same tool follows is an error_recovery (a real finding, tested in
+    test_features), which would admit the thread under the demo override.
+    """
     for event in events:
-        if event["event"] == "tool.result" and event["seq"] == 8:
+        if event["event"] == "tool.result" and event["seq"] == 11:
             event["output"] = (
                 "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nKeyError: 'amount'"
             )
@@ -672,7 +677,7 @@ async def test_demo_ok_status_with_error_output_is_not_success(
     assert report["episodes"]["counts"] == {} and report["llm"]["calls_used"] == 0
     (note,) = report["episodes"]["detector_notes"]
     assert (note["detector"], note["reason"], note["seqs"]) == ("observed_procedure", "error_in_output", [4, 7, 10])
-    assert note["detail"] == "bash at seq 8 returned ok but its output contains 'Traceback (most recent call last)'"
+    assert note["detail"] == "bash at seq 11 returned ok but its output contains 'Traceback (most recent call last)'"
 
 
 @pytest.mark.asyncio

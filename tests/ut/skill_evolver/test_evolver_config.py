@@ -78,7 +78,7 @@ def test_packaged_default_is_schema_v2_with_spec_defaults(tmp_path: Path) -> Non
     assert cfg.policy == "strict_knowledge"
     assert cfg.min_evidence_score == 1.0 == DEFAULT_MIN_EVIDENCE_SCORE == module.DEFAULT_MIN_EVIDENCE_SCORE
     assert cfg.excerpt_max_chars == 1000
-    assert cfg.bundle_max_chars == 30000
+    assert cfg.bundle_max_chars == 60000
     assert cfg.surrounding_events == 2
     assert cfg.cross_session_limit == 20 == CROSS_SESSION_LIMIT
     assert cfg.on_nothing == "expand_context_once"
@@ -91,6 +91,7 @@ def test_packaged_default_is_schema_v2_with_spec_defaults(tmp_path: Path) -> Non
     assert STAGES == ("classify", "render", "review")
     assert cfg.save_decision_report is True
     assert cfg.save_evidence_text is False
+    assert cfg.save_rejected_drafts is True
     assert cfg.legacy_format is False
     assert cfg.prompt_file is None
     assert cfg.notes == () and cfg.overrides == ()
@@ -456,6 +457,7 @@ def test_effective_rules_record_is_flat_and_json_able(tmp_path: Path) -> None:
         "output_root",
         "save_decision_report",
         "save_evidence_text",
+        "save_rejected_drafts",
     }
 
 

@@ -1,0 +1,44 @@
+# Background SKILL.md mining, one batch per activation.
+# Full guide: src/msagent/skill_evolver/daemon/README.md
+#
+# Install as a user unit (no root needed, and it sees your ~/.msagent):
+#
+#   mkdir -p ~/.config/systemd/user
+#   install -m 644 resources/systemd/msagent-skill-daemon.service \
+#       resources/systemd/msagent-skill-daemon.timer ~/.config/systemd/user/
+#   sed -i "s|^ExecStart=.*|ExecStart=$(command -v msagent-skill-daemon) --once|" \
+#       ~/.config/systemd/user/msagent-skill-daemon.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now msagent-skill-daemon.timer
+#
+# "install -m 644" rather than "cp": files on a Windows mount (/mnt/c, /mnt/d) look
+# executable, and systemd warns about executable unit files.
+#
+# Then turn the daemon on in ~/.msagent/config/config.skill.daemon.yml (enabled: true).
+# Watch it with:  journalctl --user -u msagent-skill-daemon -f
+
+[Unit]
+Description=msAgent background SKILL.md miner (one tick)
+Documentation=file:%h/.msagent/config/config.skill.daemon.yml
+After=network.target
+
+[Service]
+Type=oneshot
+# Must be an absolute path: a unit does not search your PATH. The sed above sets it.
+ExecStart=%h/.local/bin/msagent-skill-daemon --once
+# Nor does a unit read your shell profile. Put the variables your config.llms.yml names
+# in api_key_env (and HTTP(S)_PROXY if you need one) into this file, mode 600. The
+# leading "-" makes a missing file not an error.
+EnvironmentFile=-%h/.msagent/skill-daemon.env
+# The tick is I/O- and API-bound; keep it out of the way of interactive work.
+Nice=10
+IOSchedulingClass=idle
+# A tick that hangs on an unresponsive model endpoint must not block the next one.
+TimeoutStartSec=3600
+
+# /usr, /boot, /efi and /etc become read-only. Not "strict": that would make everything
+# outside /home read-only as well, and the daemon writes proposals into each project's
+# working directory, which can live anywhere (/mnt/d under WSL, /srv, /data, ...).
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full

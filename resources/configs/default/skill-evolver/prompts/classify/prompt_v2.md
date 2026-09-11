@@ -49,7 +49,7 @@ These hold whatever the selection policy says. The policy decides which kind of 
 
 - Every claim in a candidate is grounded in cited `ev` ids: the rule, its condition, its constraints and its outcome must each be readable from shown fragments.
 - Keep the conditions the evidence shows (`applies_when`, `constraints`) and never invent them; leave a field empty rather than guess.
-- Turn one-time paths, ids and values into parameters, but keep the durable file names, columns and environment conventions the procedure depends on.
+- Turn one-time paths, ids and values into parameters — a row limit such as `LIMIT 50`, a page size, a host, a timestamp and the outputs of this run are one-time values — but keep the durable file names, columns and environment conventions the procedure depends on.
 - `expected_outcome` comes only from observed results: a `status ok` is not success, the output is.
 - Reject unsafe procedures: destructive or irreversible operations, exposure of secrets, bypassing approvals or safety checks.
 - Do not add commands, flags, versions, units or guarantees of success the evidence does not show.
@@ -83,7 +83,7 @@ One decision per episode, or per group of episodes about the same rule; every sh
 - `decision`: `accept` when these episodes produced a candidate (including a `reference` or `update` candidate), `reject` otherwise.
 - `reason_code`, exactly one of:
   - `accepted`: the episodes support a candidate listed above; used only with `accept`.
-  - `routine_activity`: the work shown is ordinary execution of the task that the selection policy does not ask to preserve.
+  - `routine_activity`: the work shown is ordinary execution of the task that the selection policy does not ask to preserve; listing directories or enumerating the tables and columns of a database is ordinary execution unless the excerpts show a rule about them.
   - `insufficient_evidence`: the shown fragments do not let you establish the rule, its condition or its outcome — code may add context and ask again once.
   - `transient_observation`: what happened depends on a temporary state (a cache, a briefly failing service, a one-time value) and will not repeat.
   - `already_covered`: the library already states this rule and the policy offers no `reference` or `update` candidate worth emitting.

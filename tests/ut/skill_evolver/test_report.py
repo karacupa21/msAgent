@@ -36,6 +36,7 @@ from msagent.skill_evolver import report as module
 from msagent.skill_evolver.report import (
     REPORT_VERSION,
     decisions_dir,
+    draft_file_names,
     is_synthetic,
     write_report,
 )
@@ -140,6 +141,39 @@ def test_report_saves_evidence_only_when_given(tmp_path: Path) -> None:
     assert json.loads(with_text.read_text(encoding="utf-8"))["evidence_text_file"] == sibling.name
     if sys.platform != "win32":
         assert (sibling.stat().st_mode & 0o777) == 0o600
+
+
+def test_report_writes_rejected_drafts_next_to_it(tmp_path: Path) -> None:
+    directory = decisions_dir(tmp_path / "state")
+    drafts = [
+        {
+            "plan": "create: Ascend Profiler database schema enumeration",
+            "code": "quality_review_failed",
+            "content": "---\nname: x\n---\nbody\n",
+        },
+        {"plan": "update alpha (2 rules)", "code": "render_invalid", "content": "not even frontmatter"},
+    ]
+
+    path = write_report(directory, thread_id="t3", payload=PAYLOAD, rejected_drafts=drafts)
+
+    names = json.loads(path.read_text(encoding="utf-8"))["rejected_draft_files"]
+    assert names == draft_file_names(path.stem, drafts)
+    assert names == [
+        f"{path.stem}.draft-1-create-ascend-profiler-database-schema-enumeration.rejected.md",
+        f"{path.stem}.draft-2-update-alpha-2-rules.rejected.md",
+    ]
+    first = path.with_name(names[0]).read_text(encoding="utf-8")
+    assert first.startswith("---\nname: x\n---\nbody\n")
+    assert first.rstrip().endswith("never a proposal -->")
+    assert "quality_review_failed" in first and "create: Ascend Profiler database schema enumeration" in first
+    assert path.with_name(names[1]).read_text(encoding="utf-8").startswith("not even frontmatter\n")
+    assert sorted(p.name for p in directory.iterdir()) == sorted([path.name, *names])
+    if sys.platform != "win32":
+        assert all((path.with_name(name).stat().st_mode & 0o777) == 0o600 for name in names)
+    # Without drafts the key is an empty list and no sibling appears.
+    plain = write_report(directory, thread_id="t4", payload=PAYLOAD)
+    assert json.loads(plain.read_text(encoding="utf-8"))["rejected_draft_files"] == []
+    assert sorted(p.name for p in directory.glob("*.rejected.md")) == sorted(names)
 
 
 def test_report_name_collision_gets_suffix_and_write_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

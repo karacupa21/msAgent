@@ -75,6 +75,7 @@ from msagent.skill_evolver.pipeline import (
     ThreadInput,
     bundle_preview,
     collect_episodes,
+    draft_lines,
     gate_lines,
     load_prompts,
     print_policy_block,
@@ -310,6 +311,28 @@ def count_shape(trajectory: Trajectory) -> tuple[int, int, int]:
     tool_calls = sum(len(turn.tool_calls) for turn in trajectory.turns)
     ai_messages = sum(len(turn.ai_messages) for turn in trajectory.turns)
     return turns, tool_calls, ai_messages
+
+
+def failed_turn_lines(stats: list[ThreadStats]) -> list[str]:
+    """One line per thread that recorded neither tool calls nor model replies because its turns ended in an error.
+
+    Such a file (an authentication failure at the first LLM call, for
+    instance) is not a pre-``ignore_agent`` recording: the tool-less note
+    would name the wrong cause.
+    """
+    lines: list[str] = []
+    for item in stats:
+        if item.tool_calls or item.ai_messages:
+            continue
+        errors = [turn.error_type or "error" for turn in item.trajectory.turns if turn.status == "error"]
+        if not errors:
+            continue
+        kinds = ", ".join(dict.fromkeys(errors))
+        lines.append(
+            f"Thread {short_thread(item.thread_id)}: {len(errors)} turn(s) ended with {kinds} before any tool call "
+            "or model reply; nothing to mine."
+        )
+    return lines
 
 
 def build_threads_table(stats: list[ThreadStats], *, min_score: float, demo: bool = False) -> Table:
@@ -595,8 +618,12 @@ class SkillMiningHandler:
         console.console.print(
             build_threads_table(stats, min_score=rules.min_evidence_score, demo=rules.demo),
         )
-        if any(item.tool_calls == 0 for item in stats):
+        # The note explains a file with model replies but no tool events; a
+        # file with neither (a turn that died at its first LLM call) gets its own line.
+        if any(item.tool_calls == 0 and item.ai_messages > 0 for item in stats):
             console.print(f"[muted]{_NO_TOOL_EVENTS_NOTE}[/muted]")
+        for line in failed_turn_lines(stats):
+            console.print(f"[muted]{escape(line)}[/muted]")
 
         if options.dry_run:
             self._report_dry_run(stats, rules)
@@ -732,6 +759,9 @@ class SkillMiningHandler:
         console.print_info(f"Mining {len(passing)} threads (up to {bound} LLM calls)")
         total = PlanTally()
         nothing = 0
+        # Threads whose every plan was refused (invalid twice, review failed,
+        # secrets, budget, transport): they neither saved nor "had nothing".
+        unwritten = 0
         failed: list[str] = []
         for position, item in enumerate(passing, start=1):
             tally = await self._mine_thread(item, run=run, position=position, total=len(passing))
@@ -741,14 +771,20 @@ class SkillMiningHandler:
             total.add(tally)
             if tally.plans == 0:
                 nothing += 1
+            elif tally.proposals == 0:
+                unwritten += 1
 
+        # Every thread lands in exactly one of: with a proposal, skipped by the
+        # gate, nothing to save, rejected at render, failed (proposals are counted, not threads).
         summary = (
             f"Mined {len(stats)} threads: {total.proposals} proposals,"
             f" {below} skipped by the gate, {nothing} nothing to save,"
-            f" {len(failed)} failed"
+            f" {unwritten} rejected at render, {len(failed)} failed"
         )
-        if failed or total.render_errors:
+        if failed:
             report = console.print_error
+        elif total.render_errors:
+            report = console.print_warning
         elif total.proposals:
             report = console.print_success
         else:
@@ -758,7 +794,7 @@ class SkillMiningHandler:
             console.print_error(escape(f"Failed threads: {', '.join(failed)}"))
         if total.flagged:
             line = f"Plans: {total.describe()}"
-            (console.print_error if total.render_errors else console.print_info)(line)
+            (console.print_warning if total.render_errors else console.print_info)(line)
         console.print("")
 
     async def _mine_thread(
@@ -791,6 +827,8 @@ class SkillMiningHandler:
             console.print_error(escape(f"thread {thread_id}: {exc}"))
             logger.exception("Mining thread %s failed", thread_id)
             return None
+        for line in draft_lines(result):
+            console.print(f"[muted]{escape(line)}[/muted]")
         return result.tally
 
     async def _load_skills(self) -> list[Skill]:

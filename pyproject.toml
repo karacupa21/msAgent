@@ -43,6 +43,7 @@ dependencies = [
 
 [project.scripts]
 msagent = "msagent.cli.bootstrap.app:cli"
+msagent-skill-daemon = "msagent.skill_evolver.daemon.cli:main"
 
 [tool.mypy]
 python_version = "3.11"

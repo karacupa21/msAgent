@@ -40,6 +40,10 @@ Rules of REPORT_VERSION 1:
 * ``<stem>.evidence.md`` (the bundle text per round, no model replies, no
   think blocks) is written next to the report only when the pipeline passes
   ``evidence_text`` (``diagnostics.save_evidence_text``).
+* ``<stem>.draft-<n>-<plan slug>.rejected.md`` — the last SKILL.md draft of
+  every refused plan (``diagnostics.save_rejected_drafts``), one file per
+  entry of ``rejected_drafts``, listed in the document's
+  ``rejected_draft_files``; never a proposal, never under the skills root.
 * A thread is ``synthetic`` when its agent name or a component of its
   working directory contains ``synthetic``.
 
@@ -50,8 +54,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any
@@ -63,6 +68,22 @@ DECISIONS_DIR = ("skill-evolver", "decisions")
 SYNTHETIC_MARKER = "synthetic"
 TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S%fZ"
 EVIDENCE_SUFFIX = ".evidence.md"
+DRAFT_SUFFIX = ".rejected.md"
+# Longest plan slug inside a rejected-draft file name.
+DRAFT_SLUG_CHARS = 60
+
+
+def draft_file_names(stem: str, drafts: Sequence[Mapping[str, str]]) -> list[str]:
+    """``<stem>.draft-<n>-<plan slug>.rejected.md`` for every refused plan's draft, in order."""
+    return [
+        f"{stem}.draft-{number}-{_slug(str(draft.get('plan', '')))}{DRAFT_SUFFIX}"
+        for number, draft in enumerate(drafts, 1)
+    ]
+
+
+def _slug(text: str) -> str:
+    """A file-name-safe cut of a plan label (``create: Ascend profiler …`` → ``create-ascend-profiler-…``)."""
+    return re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-")[:DRAFT_SLUG_CHARS].strip("-") or "plan"
 
 
 def decisions_dir(state_dir: Path) -> Path:
@@ -93,8 +114,15 @@ def write_report(
     thread_id: str,
     payload: Mapping[str, Any],
     evidence_text: str | None = None,
+    rejected_drafts: Sequence[Mapping[str, str]] = (),
 ) -> Path:
-    """Write the report of one thread under ``directory``; returns the JSON path."""
+    """Write the report of one thread under ``directory``; returns the JSON path.
+
+    Every entry of ``rejected_drafts`` (``{plan, code, content}``) becomes a
+    ``<stem>.draft-<n>-<plan slug>.rejected.md`` sibling (see
+    :func:`draft_file_names`) with a trailing note naming the plan and the
+    rejection code; the document lists them in ``rejected_draft_files``.
+    """
     stamp = datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
     path = _reserve(directory, f"{batch_dir_name(thread_id)}-{stamp}")
     document = dict(payload)
@@ -104,6 +132,14 @@ def write_report(
         evidence_path = path.with_name(path.stem + EVIDENCE_SUFFIX)
         _write_atomically(evidence_path, evidence_text)
         document["evidence_text_file"] = evidence_path.name
+    names = draft_file_names(path.stem, rejected_drafts)
+    for name, draft in zip(names, rejected_drafts):
+        note = (
+            f"<!-- rejected draft of plan {draft.get('plan', '')} ({draft.get('code', '')}); "
+            "kept by diagnostics.save_rejected_drafts, never a proposal -->\n"
+        )
+        _write_atomically(path.with_name(name), str(draft.get("content", "")).rstrip("\n") + "\n\n" + note)
+    document["rejected_draft_files"] = names
     _write_atomically(path, json.dumps(document, sort_keys=True, ensure_ascii=False, indent=2, default=str) + "\n")
     return path
 

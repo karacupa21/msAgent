@@ -80,7 +80,7 @@ from msagent.skill_evolver.budget import (
     LlmBudgetExhausted,
     llm_call_bound,
 )
-from msagent.skill_evolver.bundle import EXCLUDED_CODE, EvidenceBundle, build_evidence_bundle
+from msagent.skill_evolver.bundle import EXCLUDED_CODE, BundleEpisode, EvidenceBundle, build_evidence_bundle
 from msagent.skill_evolver.classify import (
     BUNDLE_PLACEHOLDER,
     CODE_CONTRACT_ERROR,
@@ -131,7 +131,7 @@ from msagent.skill_evolver.render import (
     plan_render,
     resolve_library_skill,
 )
-from msagent.skill_evolver.report import is_synthetic, write_report
+from msagent.skill_evolver.report import draft_file_names, is_synthetic, write_report
 from msagent.skill_evolver.retrieval import BM25Index
 from msagent.skill_evolver.review import (
     QUALITY_REVIEW_FAILED,
@@ -141,7 +141,7 @@ from msagent.skill_evolver.review import (
     render_and_review,
 )
 from msagent.skill_evolver.validator import skill_name
-from msagent.skill_evolver.writer import SecretsDetected, build_provenance, write_proposal
+from msagent.skill_evolver.writer import SKILL_FILE, SecretsDetected, build_provenance, scan_package, write_proposal
 from msagent.skills.factory import Skill
 from msagent.trajectory_recorder.reader import Trajectory
 
@@ -281,6 +281,8 @@ class PlanOutcome:
     verification: dict[str, str] = field(default_factory=lambda: dict(VERIFICATION_EVIDENCE_SUPPORTED))
     # Non-fatal notes for the handler's console (render_plan itself never prints).
     warnings: list[str] = field(default_factory=list)
+    # The refused plan's last SKILL.md draft (render_invalid, quality review failed); None when nothing was rendered.
+    draft: str | None = None
 
     @property
     def written(self) -> bool:
@@ -345,6 +347,10 @@ class ThreadResult:
     report_path: Path | None = None
     # bundle.text per round; kept only under diagnostics.save_evidence_text.
     evidence_texts: list[str] = field(default_factory=list)
+    # ``{plan, code, content}`` of every refused plan's last SKILL.md draft (diagnostics.save_rejected_drafts);
+    # written next to the decision report, whose siblings ``rejected_draft_paths`` then names.
+    rejected_drafts: list[dict[str, str]] = field(default_factory=list)
+    rejected_draft_paths: list[Path] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,10 +418,7 @@ def report_bundle(bundle: EvidenceBundle, *, min_score: float, demo: bool = Fals
     caller prints both (each handler has its own console).
     """
     excluded = [item.episode for item in bundle.episodes if item.status == "excluded"]
-    warnings = [
-        f"Excluded {episode.kind} (weight {episode.weight:.2f}): insufficient context for the bundle budget"
-        for episode in excluded
-    ]
+    warnings = [_exclusion_line(item) for item in bundle.episodes if item.status == "excluded"]
     decision = second_gate(bundle, min_score=min_score, demo=demo)
     if decision is None or decision.passes:
         return warnings, None
@@ -426,6 +429,15 @@ def report_bundle(bundle: EvidenceBundle, *, min_score: float, demo: bool = Fals
     if decision.detail:
         stop = f"{stop}; {decision.detail}"
     return warnings, stop
+
+
+def _exclusion_line(item: BundleEpisode) -> str:
+    """The warning for one excluded episode, with the characters it needed and the budget's leftover."""
+    episode = item.episode
+    line = f"Excluded {episode.kind} (weight {episode.weight:.2f}): insufficient context for the bundle budget"
+    if item.needed is not None and item.room is not None:
+        line += f" (needs {item.needed} chars, {item.room} left)"
+    return line
 
 
 def gate_lines(decision: GateDecision, *, min_score: float, episodes: Sequence[Episode]) -> list[str]:
@@ -717,11 +729,13 @@ async def render_plan(
         ),
     )
     if rendered.code == RENDER_INVALID:
-        return PlanOutcome(plan, rendered.calls, errors=list(rendered.errors))
+        return PlanOutcome(plan, rendered.calls, errors=list(rendered.errors), draft=rendered.draft)
     review = rendered.review_record() if rendered.review is not None else None
     if rendered.code is not None:
         rejection = CodeRejection(rendered.code, plan.label, "; ".join(rendered.errors))
-        return PlanOutcome(plan, rendered.calls, errors=list(rendered.errors), rejection=rejection, review=review)
+        return PlanOutcome(
+            plan, rendered.calls, errors=list(rendered.errors), rejection=rejection, review=review, draft=rendered.draft
+        )
 
     name = skill_name(rendered.content)
     covered_by = next((c.covered_by for c in plan.candidates if c.covered_by), None)
@@ -1055,6 +1069,21 @@ class _ThreadRun:
 
     # ------------------------------------------------------------- plans
 
+    def _keep_draft(self, label: str, code: str, outcome: PlanOutcome) -> None:
+        """Keep a refused plan's last draft for the decision report (diagnostics.save_rejected_drafts).
+
+        A draft carrying a possible secret is dropped with a warning: the
+        rule the proposal writer applies (nothing with a secret is written).
+        """
+        if outcome.draft is None or not self.rules.save_rejected_drafts:
+            return
+        findings = scan_package({SKILL_FILE: outcome.draft})
+        if findings:
+            detail = "; ".join(findings)
+            self.sink.print_warning(escape(f"plan {label}: rejected draft not kept, possible secrets: {detail}"))
+            return
+        self.result.rejected_drafts.append({"plan": label, "code": code, "content": outcome.draft})
+
     async def _plans(self, classification: Classification, bundle: EvidenceBundle) -> None:
         run, rules, result, sink = self.run, self.rules, self.result, self.sink
         plans = plan_render(classification.candidates, run.skills, max_plans=rules.max_plans)
@@ -1137,6 +1166,7 @@ class _ThreadRun:
                 for line in rejection_lines(label, outcome):
                     sink.print_error(escape(line))
                 result.stages.append(StageOutcome(f"plan {label}", "rejected", outcome.rejection.code))
+                self._keep_draft(label, outcome.rejection.code, outcome)
                 continue
             if not outcome.written:
                 tally.render_errors += 1
@@ -1145,6 +1175,7 @@ class _ThreadRun:
                 for error in outcome.errors:
                     sink.print_error(escape(f"  - {error}"))
                 result.stages.append(StageOutcome(f"plan {label}", "rejected", RENDER_INVALID))
+                self._keep_draft(label, RENDER_INVALID, outcome)
                 continue
             tally.proposals += 1
             result.proposals.append(str(outcome.skill_path))
@@ -1224,15 +1255,24 @@ def _write_report(run: RunContext, thread: ThreadInput, result: ThreadResult) ->
     if run.rules.save_evidence_text and result.evidence_texts:
         rounds = enumerate(result.evidence_texts, start=1)
         evidence_text = "\n\n".join(f"# Round {number}\n\n{text}" for number, text in rounds)
+    drafts = list(result.rejected_drafts)
     try:
         result.report_path = write_report(
             run.report_dir,
             thread_id=result.thread_id,
             payload=build_report(run, thread, result),
             evidence_text=evidence_text,
+            rejected_drafts=drafts,
         )
+        names = draft_file_names(result.report_path.stem, drafts)
+        result.rejected_draft_paths = [result.report_path.with_name(name) for name in names]
     except Exception:
         logger.warning("Decision report of thread %s not written", result.thread_id, exc_info=True)
+
+
+def draft_lines(result: ThreadResult) -> list[str]:
+    """The muted lines naming the rejected-draft files a thread left next to its decision report."""
+    return [f"Rejected SKILL.md draft kept for inspection: {path}" for path in result.rejected_draft_paths]
 
 
 async def record_gate_refusal(run: RunContext, thread: ThreadInput) -> ThreadResult:

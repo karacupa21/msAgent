@@ -192,9 +192,13 @@ class RenderedSkill:
     # RENDER_INVALID | QUALITY_REVIEW_FAILED | INSUFFICIENT_CONTEXT_BUDGET, None on success.
     code: str | None = None
     errors: list[str] = field(default_factory=list)
-    # The plan passed only after the one corrective render; ``initial_issues`` is what the first review found.
+    # ``corrected``: the plan passed only after the one corrective render. ``initial_issues`` is
+    # what the first review found whenever a corrective render ran — on the pass and the fail path.
     corrected: bool = False
     initial_issues: list[str] = field(default_factory=list)
+    # The last SKILL.md the model produced when the plan was refused (render_invalid, quality
+    # review failed): kept for the decision report's rejected-draft file, never written as a proposal.
+    draft: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -354,8 +358,9 @@ def _failed(
     rendered: RenderResult | None,
     review: ReviewResult | None,
     calls: int,
+    initial_issues: Sequence[str] = (),
 ) -> RenderedSkill:
-    """A rejected plan: nothing may be written; ``rendered`` keeps the selection and validation for the record."""
+    """A rejected plan: nothing may be written; ``rendered`` keeps the selection, validation and draft for the record."""
     return RenderedSkill(
         content=None,
         validation=rendered.validation if rendered is not None else None,
@@ -365,6 +370,8 @@ def _failed(
         calls=calls,
         code=code,
         errors=errors,
+        initial_issues=list(initial_issues),
+        draft=rendered.content if rendered is not None else None,
     )
 
 
@@ -457,9 +464,12 @@ async def render_and_review(
         required_prefix=required_prefix,
     )
     calls += revised.calls
+    initial = first.issue_lines()
     if not revised.ok:
         errors = [f"corrective SKILL.md invalid: {error}" for error in revised.validation.errors]
-        return _failed(QUALITY_REVIEW_FAILED, errors, rendered=revised, review=first, calls=calls)
+        return _failed(
+            QUALITY_REVIEW_FAILED, errors, rendered=revised, review=first, calls=calls, initial_issues=initial
+        )
     try:
         second = await review_skill_md(
             revised.content,
@@ -473,12 +483,20 @@ async def render_and_review(
         )
     except ReviewContractError as exc:
         calls += exc.calls
+        errors = [f"reviewer reply invalid: {exc}"]
         return _failed(
-            QUALITY_REVIEW_FAILED, [f"reviewer reply invalid: {exc}"], rendered=revised, review=first, calls=calls
+            QUALITY_REVIEW_FAILED, errors, rendered=revised, review=first, calls=calls, initial_issues=initial
         )
     calls += second.calls
     if second.verdict == "fail":
-        return _failed(QUALITY_REVIEW_FAILED, second.issue_lines(), rendered=revised, review=second, calls=calls)
+        return _failed(
+            QUALITY_REVIEW_FAILED,
+            second.issue_lines(),
+            rendered=revised,
+            review=second,
+            calls=calls,
+            initial_issues=initial,
+        )
     return RenderedSkill(
         content=revised.content,
         validation=revised.validation,

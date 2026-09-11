@@ -160,7 +160,7 @@ dataclass defaults; the file is never written). The packaged document:
 | `classification.policy` | `strict_knowledge` | `must be one of strict_knowledge, reusable_workflow, got '…'` |
 | `gate.min_evidence_score` | `1.0` | `must be a finite non-negative number, got …` — the YAML integer `1` is accepted, a boolean is not; threshold of both gates (section 14) |
 | `evidence.excerpt_max_chars` | `1000` | `must be a positive whole number, got 0` (`must be a whole number, got True`) — longest cut of one event in the bundle |
-| `evidence.bundle_max_chars` | `30000` | positive whole number — the bundle budget; the model context is checked separately at run time (section 19) |
+| `evidence.bundle_max_chars` | `60000` | positive whole number — the bundle budget; the model context is checked separately at run time (section 19). Raised from 30000 with the v5 detectors: on SQL-heavy sessions one `repeated_procedure` block is ~9 K chars and 30000 cut exactly the `error_recovery` blocks, which rank last (weight 0.6) |
 | `evidence.surrounding_events` | `2` | `must be a whole number >= 0, got -1` — neighbours per side added by `expand_context_once` |
 | `evidence.cross_session_limit` | `20` | positive whole number — newest trajectories of the agent mined for `repeated_procedure` |
 | `on_nothing.action` | `expand_context_once` | `must be one of stop, expand_context_once, got '…'` |
@@ -172,6 +172,7 @@ dataclass defaults; the file is never written). The packaged document:
 | `prompts.classify`, `prompts.render`, `prompts.review` | `prompt_v2.md` | text, `must be a file name without path separators or '..', got '/etc/passwd'` — file inside `skill-evolver/prompts/<stage>/` (section 6) |
 | `diagnostics.save_decision_report` | `true` | boolean — the decision report (section 20) |
 | `diagnostics.save_evidence_text` | `false` | boolean — additionally store the bundle text next to the report |
+| `diagnostics.save_rejected_drafts` | `true` | boolean — keep the last SKILL.md draft of every refused plan next to the decision report (section 20) |
 
 Any other key is `unknown key`; a section given as a scalar is `must be a mapping`; a non-string
 name is `must be text, got 5`. Nothing falls back
@@ -696,7 +697,7 @@ class GateDecision:
                               # GATE_DEMO_NOT_APPLICABLE
     describe() -> str         # "reason" or "reason; detail" — what every table and line prints
 
-FEATURES_VERSION = 4              # recorded in provenance.json; bumped with any rule or weight
+FEATURES_VERSION = 5              # recorded in provenance.json; bumped with any rule or weight (v5: see *v5 rules* below)
 DEFAULT_MIN_EVIDENCE_SCORE = 1.0  # gate threshold when the config sets none
 REQUIRED_ROLES = {"error_recovery": {"error", "fixed_call", "result"}, "user_correction": {"correction"},
                   "retry_loop": {"attempt"}, "approval_denied": {"approval"},
@@ -716,15 +717,29 @@ gate_decision(episodes, *, min_score, demo=False) -> GateDecision
 expand_episode_context(episodes, traj, *, surrounding_events, only=None) -> list[Episode]
 ```
 
-| Kind | Weight | Rule (v4, one private `_detect_<kind>` each) | Facts | Anchors · Evidence (**required** / context) |
+| Kind | Weight | Rule (v5, one private `_detect_<kind>` each) | Facts | Anchors · Evidence (**required** / context) |
 |---|---|---|---|---|
-| `error_recovery` | 0.6 | inside one stream (turn group × subagent, see *Context streams*): a `status == "error"` call followed within `RECOVERY_WINDOW` (5) calls of the same stream by an `ok` call of the same tool; the first such `ok` call decides — a non-empty raw argument diff is the recovery, identical arguments (transient failure, or calls recorded without `tool.start`) are nothing; same-tool `error` / `orphan` calls in between are skipped. A following `dispatch` turn, another subagent and an orphan never recover; two failures sharing one recovery give two episodes (two diffs) | `tool`, `error_type`, `error` (`error` or, for a `tool.result` with `status=error`, its `output_text`; head 100 + tail 180, the cut marked), `args_diff` (`added` / `removed` clipped; `changed{old,new}` windowed on the change: common prefix and suffix dropped, 60 chars of context each side), `calls_between`, `subagent` | anchors: the failed call and the recovery · **`error`** (end of the failed call, snippet = the error text), **`fixed_call`** (start of the ok call), **`result`** (its end) / `failed_call` (start of the failed call), `task` (the user message that opened the turn group; v4 context) |
+| `error_recovery` | 0.6 | inside one stream (turn group × subagent, see *Context streams*): a failed call — `status == "error"`, or (v5) an `ok` call whose output carries an `ERROR_MARKERS` text, `_failed_call`: an MCP tool answering `{"error": "SQL_EXECUTION_FAILED", …}` with status ok — followed within `RECOVERY_WINDOW` (5) calls of the same stream by an `ok` call of the same tool without such a marker; the first such `ok` call decides — a non-empty raw argument diff is the recovery, identical arguments (transient failure, or calls recorded without `tool.start`) are nothing; same-tool `error` / `orphan` calls in between are skipped. A following `dispatch` turn, another subagent and an orphan never recover; two failures sharing one recovery give two episodes (two diffs) | `tool`, `error_type`, `error` (`error` or, for a `tool.result` with `status=error` or a marker in its output, its `output_text`; head 100 + tail 180, the cut marked), `detected_by` (`status` / `output_marker`, v5), `args_diff` (`added` / `removed` clipped; `changed{old,new}` windowed on the change: common prefix and suffix dropped, 60 chars of context each side), `calls_between`, `subagent` | anchors: the failed call and the recovery · **`error`** (end of the failed call, snippet = the error text), **`fixed_call`** (start of the ok call), **`result`** (its end) / `failed_call` (start of the failed call), `task` (the user message that opened the turn group; v4 context) |
 | `user_correction` | 0.9 strong / 0.5 weak | adjacent turn groups: the head of the later group has a `user_message` containing a `STRONG_CORRECTION_MARKERS` or `WEAK_CORRECTION_MARKERS` phrase (en + zh, case-insensitive, at a word start unless the marker opens with a Han character; the negations `不，` / `no,` only when they open the message) **and** the group's actions differ from the previous group's — a tool added or removed (name sets over all calls of each group, any subagent) or a tool used in both groups whose last call before and first call after differ in normalized arguments. A marker without an observed change is nothing; a head without a user message (`resume`) cannot correct, and the prelude turn is never the corrected group. `strength` is `strong` when a strong marker is present, else `weak` with `WEAK_CORRECTION_WEIGHT` | `correction_text` (the window of 120 chars each side of the first marker in the whitespace-collapsed message, cuts marked — a long message keeps the phrase, not its head), `strength`, `markers`, `tools_before`, `tools_after`, `changes{tools_added, tools_removed, args_changed{tool: diff}}` (diffs windowed on the change), `run_id_before`, `run_id_after` | anchor: the correcting turn (`turn.start` of the head) · **`correction`** (that turn, snippet = the marker window) / `corrected_turn`, and per tool in `args_changed` a `before_call` and an `after_call` |
-| `retry_loop` | 0.7 | inside one stream: calls chained by `(tool name, work object)` — a call recorded without arguments has no object and never chains; ≥ `RETRY_MIN_ATTEMPTS` (3) attempts (orphans count) with ≥ 2 distinct normalized argument sets **and** either a failed attempt (`status == "error"`) or variants differing in a `SEARCH_KEYS` key (`pattern` / `query` / `regex`). Reading three files is a fan-out and a parameter sweep that never failed is not a loop | `tool_name`, `work_object`, `attempts`, `reason` (`failed attempt` / `search key varies`), `args_variants` (normalized), `statuses`, `run_id` (turn of the first attempt), `outcome` (v4: the clipped result or error of the last attempt) | anchors: every attempt · per attempt **`attempt`** (start) and its **`result`** / **`error`** (end, error snippet = clipped error text) — required for the first and the last attempt, context in between; `task` (context, v4) |
+| `retry_loop` | 0.7 | inside one stream: calls chained by `(tool name, work object)` — a call recorded without arguments has no object and never chains; ≥ `RETRY_MIN_ATTEMPTS` (3) attempts (orphans count) with ≥ 2 distinct normalized argument sets **and** either a failed attempt (`_failed_call`: `status == "error"` or an `ERROR_MARKERS` output, v5) or a `SEARCH_KEYS` key (`pattern` / `query` / `regex`) that changed right after a *fruitless* attempt — one that failed, returned an empty output or a `NO_RESULT_MARKERS` text (`no matches` / `no results` / `no files` / `nothing found` / `0 matches|results|rows`; v5, `_forced_search`). Reading three files is a fan-out, a parameter sweep that never failed is not a loop, and a query refined after a result (sixty SQL statements that each returned rows) is analysis, not a retry. `db_path` / `database` are `PATH_KEYS` (v5): an SQL tool's work object is its database file | `tool_name`, `work_object`, `attempts`, `reason` (`failed attempt` / `search key varies`), `args_variants` (normalized), `statuses`, `run_id` (turn of the first attempt), `outcome` (v4: the clipped result or error of the last attempt) | anchors: every attempt · per attempt **`attempt`** (start) and its **`result`** / **`error`** (end, error snippet = clipped error text) — required for the first and the last attempt, context in between; `task` (context, v4) |
 | `approval_denied` | 1.0 | every `Approval` of a turn is read by `classify_approval(request, decision)`: `denied` is an episode naming the rejected actions only, `approved` is skipped, `unknown` is logged at debug level with its reason and skipped. Context: the calls of the approval's turn with `seq_start > approval.seq` plus the calls of the following turns of the **same group** (the `resume` continuation of an interrupted turn, never the next `dispatch` turn), capped at `DENIAL_CONTEXT_CALLS` (3), any subagent — `Approval` has no subagent field | `interrupt_id`, `run_id`, `tools` (names of the rejected actions), `denied_actions` (`verdict.denied`), `request`, `decision`, `next_tools` | anchor: the approval · **`approval`** / `next_call` ×≤3 |
 | `skill_gap` | 0.4 | unchanged since v2: domain tools (anything but `get_skill` / `fetch_skills` / `get_tool` / `fetch_tools` / `run_tool`) were used, `skills_consulted` is empty, and the BM25 top hit of *user messages + tool names* against the library scores ≥ `SKILL_GAP_MIN_SCORE` (1.0). A description-fix candidate, not a new skill. Needs a `BM25Index` from `retrieval.py` (stdlib BM25 over `name + description`; the caller builds `SkillDoc(skill.display_name, skill.description)` — `features.py` never imports `msagent.skills`) | `candidate_skill`, `score`, `matched_terms`, `domain_tools` | no anchors — a trajectory-level observation · **`first_call`**, **`user_message`** (the first) / `user_message` (the rest) |
-| `repeated_procedure` | 1.0 | `mine_cross_session` only: steps are *segments* of one stream — catalog calls are dropped and a call with `status != "ok"` closes the segment, so a repeated failure is never a procedure; tool-name n-grams (n = 2..5) inside segments present in ≥ `min_support` **distinct** `thread_id`s (`min_support < 2` raises). Only closed patterns are reported — a sub-n-gram with the same support as a longer one is dropped, so a shared five-step procedure is one episode, not ten. The episode belongs to the first supporting trajectory in input order and cites the steps of that trajectory **and** of the lexicographically first other supporting thread — proof from two sessions — while `support` counts every supporting thread. It says that several sessions issued these calls in this order and each returned `ok`, never that the task succeeded | `ngram`, `support`, `thread_ids` | anchors: the own-thread steps · **`step`** of both threads (the bundle indexes the second trajectory too) / per own-thread step its `result` (v4; collapses into the step when the call was recorded without `tool.start`), the owner group's `task` (v4) |
-| `observed_procedure` | **0.00** | **demo only** (`extract_episodes(..., demo=True)`), always extracted, not only when nothing else fired: the segments of `_procedure_segments(min_len=1)` — consecutive `ok` domain calls of one stream — are cut into disjoint windows of at most `OBSERVED_MAX_CALLS` (5) calls **from the start** of the segment (the head of a procedure carries its inputs); at most `OBSERVED_MAX_CHAINS` (3) windows per trajectory become episodes, in model order. A window is dropped for the first problem found, in this order: the group head has no user message (`no_task_context`; a previous group's message is never borrowed), a call was recorded without `tool.start` (`missing_tool_start`; its arguments are unknown), any step's output matches an `ERROR_MARKERS` regex (`error_in_output`; the ten patterns, each compiled on its own so an inline `(?i)` is per pattern: `Traceback \(most recent call last\)`, `\b[A-Z][A-Za-z0-9_]*(?:Error\|Exception)\b`, `(?i)\berror:`, `(?i)\bfatal:`, `\bFAILED\b`, `No such file or directory`, `command not found`, `Permission denied`, `(?i)\b(?:exit code\|exit status)\s+[1-9]\d*\b`, `(?i)\bnon-zero exit\b` — no bare `error`, so `0 errors` is not a marker), the last output is empty (`empty_result`); plus `chain_limit`, `duplicate_chain` (a defensive invariant — windows are disjoint) and `no_completed_calls` (no segment at all: an assistant saying "done" without a completed call yields nothing; **AI messages are never read**). Every drop is a `DetectorNote` for the dry run and the report. `status: ok` alone is never proof — the observed output is | `task` (the user message), `run_id`, `subagent`, `chain_index`, `calls`, `steps[{tool, work_object, args, result}]`, `outcome` (last output, head 60 + tail 139), `verification` (`observed output of <tool>: <outcome>`) | anchors: `run_id#seq_start` of every step (they may share an incident with a `retry_loop` / `error_recovery` of the same calls — the score does not change, the max weight wins) · **`task`** (the group's `turn.start`), per call **`step`** (start) and **`result`** (end, snippet = clipped output) — all required, the episode is a complete package or nothing |
+| `repeated_procedure` | 1.0 | `mine_cross_session` only: steps are *segments* of one stream — catalog calls are dropped and a call with `status != "ok"` — or, v5, an `ok` call with an `ERROR_MARKERS` output (`_procedure_segments(split_on_markers=True)`) — closes the segment, so a repeated failure is never a procedure; n-grams (n = 2..5) of **step keys** (`_step_key`, v5: the tool name plus the program of every shell segment of a command argument — `which sqlite3` → `execute:which`, `cd x && python3 -c …` → `execute:python3` — or the verb and first table of an SQL argument — `execute_sql:SELECT sqlite_master`; any other call by its tool name) over the **runs** of a segment (`_key_runs`: consecutive calls with one key are one step, cited by the run's first call) present in ≥ `min_support` **distinct** `thread_id`s (`min_support < 2` raises); an n-gram of one key is never formed. In v4 the n-grams were over bare tool names, which made every run of the same shell or SQL tool (`ls, ls, ls, ls`; five `execute_sql` in a row) a "shared procedure" of weight 1.0 on every shell-driven agent. Only closed patterns are reported — a sub-n-gram with the same support as a longer one is dropped, so a shared five-step procedure is one episode, not ten. The episode belongs to the first supporting trajectory in input order and cites the steps of that trajectory **and** of the lexicographically first other supporting thread — proof from two sessions — while `support` counts every supporting thread. It says that several sessions issued these calls in this order and each returned `ok`, never that the task succeeded | `ngram` (the owner's tool names, = `tool_sequence`), `step_keys` (v5), `support`, `thread_ids` | anchors: the own-thread steps · **`step`** of both threads (the bundle indexes the second trajectory too) / per own-thread step its `result` (v4; collapses into the step when the call was recorded without `tool.start`), the owner group's `task` (v4) |
+| `observed_procedure` | **0.00** | **demo only** (`extract_episodes(..., demo=True)`), always extracted, not only when nothing else fired: the segments of `_procedure_segments(min_len=1, split_on_markers=False)` — consecutive `ok` domain calls of one stream; an `ok` call with an `ERROR_MARKERS` output stays in its segment so that the window is dropped with a note rather than silently split — are cut into disjoint windows of at most `OBSERVED_MAX_CALLS` (5) calls **from the start** of the segment (the head of a procedure carries its inputs); at most `OBSERVED_MAX_CHAINS` (3) windows per trajectory become episodes, in model order. A window is dropped for the first problem found, in this order: the group head has no user message (`no_task_context`; a previous group's message is never borrowed), a call was recorded without `tool.start` (`missing_tool_start`; its arguments are unknown), any step's output matches an `ERROR_MARKERS` regex (`error_in_output`; the twelve patterns, each compiled on its own so an inline `(?i)` is per pattern: `Traceback \(most recent call last\)`, `\b[A-Z][A-Za-z0-9_]*(?:Error\|Exception)\b`, `(?i)\berror:`, `(?i)\bfatal:`, `\bFAILED\b`, `No such file or directory`, `command not found`, `Permission denied`, `(?i)\b(?:exit code\|exit status)\s+[1-9]\d*\b`, `(?i)\bnon-zero exit\b`, and (v5) `"error"\s*:\s*"(?=[^"])` — a JSON error field with a non-empty text value, the shape MCP tools use to report a failure with status ok — and `\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_FAILED\b` — an upper-case failure code such as `SQL_EXECUTION_FAILED`, which `\bFAILED\b` misses after an underscore — no bare `error`, so `0 errors` is not a marker and `{"error": null}` is none either), the last output is empty (`empty_result`); plus `chain_limit`, `duplicate_chain` (a defensive invariant — windows are disjoint) and `no_completed_calls` (no segment at all: an assistant saying "done" without a completed call yields nothing; **AI messages are never read**). Every drop is a `DetectorNote` for the dry run and the report. `status: ok` alone is never proof — the observed output is | `task` (the user message), `run_id`, `subagent`, `chain_index`, `calls`, `steps[{tool, work_object, args, result}]`, `outcome` (last output, head 60 + tail 139), `verification` (`observed output of <tool>: <outcome>`) | anchors: `run_id#seq_start` of every step (they may share an incident with a `retry_loop` / `error_recovery` of the same calls — the score does not change, the max weight wins) · **`task`** (the group's `turn.start`), per call **`step`** (start) and **`result`** (end, snippet = clipped output) — all required, the episode is a complete package or nothing |
+
+**v5 rules (2026-09-10), and the run that motivated them.** Five Profiler sessions over Ascend
+profiler SQLite output were mined under `strict_knowledge`: 32 episodes, all `repeated_procedure`
+or `retry_loop`, not one `error_recovery`. Every "shared procedure" was a run of one tool name
+(`ls, ls, ls, ls` with support 4, five `msprof-mcp_execute_sql` in a row), every "retry loop" was
+20–58 distinct successful SQL statements (`work_object` empty because `db_path` was no path key,
+`query` a search key), and the only durable knowledge in the sessions — four `no such column`
+failures answered as `{"error": "SQL_EXECUTION_FAILED", …}` with status ok and fixed by the next
+statement — was invisible, because failure meant `status == "error"` only. Hence: (1)
+`_failed_call` — a failure is the recorded status *or* an `ERROR_MARKERS` text in an `ok` output,
+used by `error_recovery`, `retry_loop` and the cross-session segments (the demo detector keeps
+its own `error_in_output` note); two markers added for the MCP shape; (2) step keys and runs for
+`repeated_procedure`; (3) a search-key change counts only after a fruitless attempt, and the
+database file is the SQL tool's work object. Provenance records `features_version: 5`.
 
 Design points:
 
@@ -1180,7 +1195,7 @@ end)]` and `redact_secrets(text)` (span → `[REDACTED:<label>]`) are shared wit
 | Issue codes | `lost_condition` (a When/constraint/prerequisite/completion criterion missing or weakened), `order_changed` (step order differs where the evidence shows order matters), `command_mismatch` (command, argument, flag, path shape or result differs from the evidence), `unsupported_addition` (a command, flag, API, version, unit, dependency, step or guarantee not in candidates/evidence — **including a claimed test or verification not present in the evidence**), `missing_rule` (an accepted candidate not represented), `unsafe_claim` (a prohibition or safety statement without evidence), `one_time_value` (a one-time path/id/host/timestamp left in; durable conventions are fine), `name_policy` (the name violates the review policy: no `demo-` prefix, or not a new skill, under demo), `other` |
 | What a pass means | "faithful to the candidates and evidence" — not "executed", not "works everywhere"; the reviewer compares and never rewrites; triviality, style, length and library overlap are not issues (`REVIEW_POLICY_NORMAL`: *Judge fidelity, not value*) |
 | `review_skill_md(skill_md, candidates, fragments, existing_skill_text, *, llm, template, policy_text, corrective_retry=True) -> ReviewResult(verdict, issues, unknown_refs, calls)` | guards before any call (blank SKILL.md, no candidates, no fragments, missing placeholder); an issue citing an id the renderer never saw is kept and listed in `unknown_refs` with a warning, never dropped; `record()` is the JSON stored in provenance |
-| `render_and_review(candidates, *, llm, render_template, review_template, render_policy, review_policy, evidence, existing_skill=None, existing_skill_text=None, expected_name=None, taken_names=(), required_prefix=None, evidence_budget_chars=None) -> RenderedSkill` | the per-plan stage both commands call: selection (empty or missing required → `insufficient_context_budget`, 0 calls) → `render_skill_md` (≤ 2 calls; invalid twice → `render_invalid`) → `review_skill_md` (≤ 2 calls; unusable reply → `quality_review_failed` with `reviewer reply invalid: …`) → on `fail` **one** `revise_skill_md` (1 call; invalid → `quality_review_failed` with `corrective SKILL.md invalid: …`) → `review_skill_md(corrective_retry=False)` (1 call; `fail` or invalid → `quality_review_failed`). **At most 6 `ainvoke` per plan.** `RenderedSkill(content, validation, review, render_evidence, render_evidence_omitted, calls, code, errors, corrected, initial_issues)`; `review_record()` = the final review plus `corrected` and `initial_issues` → provenance `quality_review`. `LlmBudgetExhausted` is not caught here |
+| `render_and_review(candidates, *, llm, render_template, review_template, render_policy, review_policy, evidence, existing_skill=None, existing_skill_text=None, expected_name=None, taken_names=(), required_prefix=None, evidence_budget_chars=None) -> RenderedSkill` | the per-plan stage both commands call: selection (empty or missing required → `insufficient_context_budget`, 0 calls) → `render_skill_md` (≤ 2 calls; invalid twice → `render_invalid`) → `review_skill_md` (≤ 2 calls; unusable reply → `quality_review_failed` with `reviewer reply invalid: …`) → on `fail` **one** `revise_skill_md` (1 call; invalid → `quality_review_failed` with `corrective SKILL.md invalid: …`) → `review_skill_md(corrective_retry=False)` (1 call; `fail` or invalid → `quality_review_failed`). **At most 6 `ainvoke` per plan.** `RenderedSkill(content, validation, review, render_evidence, render_evidence_omitted, calls, code, errors, corrected, initial_issues, draft)`; `review_record()` = the final review plus `corrected` and `initial_issues` — the first review's findings whenever a corrective render ran, on the fail path too, so a refused plan's report shows both rounds → provenance `quality_review`; `draft` is the last SKILL.md text of a refused plan, kept by the decision report (section 20), never written as a proposal. `LlmBudgetExhausted` is not caught here |
 | `VERIFICATION_EVIDENCE_SUPPORTED` | `{"level": "evidence_supported", "note": "not executed by generator"}` — the `verification` record of every proposal this stage passes |
 
 The pipeline prints the outcome per plan: `Quality review: passed` or `Quality review: passed
@@ -1305,6 +1320,12 @@ unknown update target, update with existing text and `base_sha256`).
 
 ## 17. CLI surface: `/trajectories`, `/skill-mine`, `/skill-review`
 
+A third caller exists outside the CLI: the background miner `msagent-skill-daemon` runs the
+same `pipeline.run_thread` on a schedule, without a user, and writes ordinary inactive
+proposals (its decision reports carry `"command": "skill-daemon"`). It adds an idempotency
+ledger and a completeness rule for trajectories, changes nothing in this pipeline, and is
+documented separately in `ARCHITECTURE_skill_daemon.md`.
+
 The pipeline of sections 14-16 was reachable only through `/direct-skill-generation`, which
 analyses one thread. Three commands open it up; the generator stays registered and working,
 marked `[deprecated]` in `/help` and printing `Use /skill-mine for trajectory-based generation.`
@@ -1358,9 +1379,16 @@ review failed, secrets, budget, a transport error) is a render error of that pla
 plan still runs; an exception outside the plan loop (classify) fails the thread — printed as
 `thread <id>: <exc>`. Names a new skill may not reuse (`RunContext.taken`) are the library plus
 every create proposal written earlier in the run, across threads. The summary line keeps its
-shape — `Mined N threads: P proposals, G skipped by the gate, Z nothing to save, F failed` —
-and, when anything besides clean proposals happened, a second line reports `Plans: R render
-errors, Q rejected targets, D deferred`. The pool is the agent's newest `cross_session_limit`
+shape — `Mined N threads: P proposals, G skipped by the gate, Z nothing to save, R rejected at
+render, F failed` — and every thread lands in exactly one of its categories: with a proposal (P
+counts proposals, not threads), skipped by the gate, nothing to save (no plan ran), rejected at
+render (every plan of the thread was refused: invalid twice, review failed, secrets, budget,
+transport) or failed (an exception outside the plans). The line is an error only when a thread
+failed, a warning when a plan was refused, a success when a proposal was written, else info;
+when anything besides clean proposals happened, a second line reports `Plans: R render
+errors, Q rejected targets, D deferred` (a warning under render errors), and a refused plan's
+kept draft is named by `Rejected SKILL.md draft kept for inspection: <path>` (section 20). The
+pool is the agent's newest `cross_session_limit`
 (20) trajectories and each target goes **first** into `collect_episodes`, so the kept
 `repeated_procedure` episodes belong to that thread; `ThreadStats.supporting` holds the pool
 trajectories their evidence cites (the second session of each shared procedure), `ThreadStats.
@@ -1441,7 +1469,7 @@ Demo overlay: gate bypass (demo_override), observed_procedure extraction, target
 Dry run: no LLM will be created.
 Evidence score: 0.00 (min_evidence_score 1.00; 1 episodes, 1 incidents)
 Gate: pass (demo_override; observed_procedure has required evidence)
-bundle: 7 fragments, 1980 chars (cap 30000); episodes shown 1, trimmed 0, excluded 0
+bundle: 7 fragments, 1980 chars (cap 60000); episodes shown 1, trimmed 0, excluded 0
 observed_procedure: read_file → bash → bash (7 events)
 observed_procedure candidates: 1 selected; dropped: none
 Dry run: nothing was written, no LLM was created, no decision report saved.
@@ -1463,7 +1491,11 @@ Files recorded before the recorder's `ignore_agent` fix carry no `tool.*` events
 (`ARCHITECTURE_trajectory_recorder.md` section 11), so **every** detector yields nothing on them —
 `user_correction` included, because it needs an observed change of the agent's actions between
 turn groups. That is the realistic first run on existing data, so a note under the Threads
-table names the cause once (not per row) whenever any selected thread shows zero tool calls.
+table names the cause once (not per row) whenever any selected thread shows zero tool calls
+but does show model replies. A thread with neither — its turns ended in an error before the
+first reply, an authentication failure at the first LLM call for instance — is not such a file,
+so it gets its own line instead (`failed_turn_lines`): `Thread <id>: N turn(s) ended with
+<error_type> before any tool call or model reply; nothing to mine.`
 
 ### 17.3 Failure policy
 
@@ -1488,7 +1520,7 @@ Three tiers, which is how "the analyzer must fail loudly" and a usable multi-thr
   tier.
 
 Every run ends on one fixed-shape line: threads mined, proposals, skipped by the gate, nothing to save,
-failed.
+rejected at render, failed (section 17.1).
 
 ### 17.4 `/skill-review`
 
@@ -1721,8 +1753,8 @@ stringified rather than lost, and a failure to write the report is logged as a w
 failing the thread. `/skill-review accept` never reads, copies or moves anything from this
 folder: the reports stay where they are when a proposal is promoted.
 
-Payload keys (`REPORT_VERSION = 1`; `report_version` and `evidence_text_file` are stamped by
-`write_report`):
+Payload keys (`REPORT_VERSION = 1`; `report_version`, `evidence_text_file` and
+`rejected_draft_files` are stamped by `write_report`):
 
 | Key | Content |
 |---|---|
@@ -1738,7 +1770,7 @@ Payload keys (`REPORT_VERSION = 1`; `report_version` and `evidence_text_file` ar
 | `classifier` | `{verdict, candidates: n, decisions[Decision], rejected[{title, reason, evidence_refs}]}` — decisions and rejections of both rounds accumulate, verdict and count are the final round's |
 | `code_rejections[]` | `{code, subject, detail}` — `insufficient_context_budget` (per excluded episode / the thread / a plan), `invalid_evidence`, `parse_error`, `contract_error`, `invalid_target`, `ambiguous_target`, `render_invalid`, `quality_review_failed`, `budget_exhausted`, `secrets_detected`, `existing_skill_unreadable` |
 | `plans` | `{rendered, proposals, render_errors, rejected_targets, deferred}` |
-| `quality_review[]` | per reviewed plan: `{plan, verdict, issues, unknown_refs, calls, corrected, initial_issues}` |
+| `quality_review[]` | per reviewed plan: `{plan, verdict, issues, unknown_refs, calls, corrected, initial_issues}` — `initial_issues` holds the first review's findings whenever a corrective render ran, on the pass and on the fail path |
 | `coverage[]` | per `reference` candidate: `{skill, title, coverage: text_read \| unverified, sha256}` |
 | `proposals[]` | the SKILL.md paths written |
 | `llm` | `{model, context_window, calls_used, limit, bound, budget_exhausted, note: "transport retries not counted"}` |
@@ -1749,6 +1781,16 @@ report — `# Round N` followed by `bundle.text` for every bundle build, **witho
 appendix, without model replies and without `<think>` blocks — and records its name in
 `evidence_text_file` (`null` otherwise). The report never contains hidden reasoning either:
 decisions carry the model's `explanation` (≤ 500 chars) and nothing else of its output.
+
+`diagnostics.save_rejected_drafts: true` (the default) keeps the last SKILL.md draft of every
+refused plan — `render_invalid`, `quality_review_failed`; the corrected draft when a correction
+ran — next to the report as `<stem>.draft-<n>-<plan slug>.rejected.md`, listed in the stamped
+`rejected_draft_files` (`[]` otherwise), each ending in an HTML comment that names the plan and
+the rejection code. A draft that trips the proposal writer's secret scan is not kept (a warning
+names the finding). The handlers print `Rejected SKILL.md draft kept for inspection: <path>`
+after the thread. The drafts live in the private state folder, never under the skills root, so
+"nothing unverified is written" (section 19) still holds: a draft is a diagnostic, not a
+proposal, and `/skill-review` never sees it.
 
 The report answers the questions a user asks after an empty run without re-running anything:
 which policy and config were in force, why the gate refused or admitted the thread, how much of

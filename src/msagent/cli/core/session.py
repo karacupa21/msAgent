@@ -20,6 +20,7 @@ from msagent.cli.theme import console, theme
 from msagent.cli.ui.prompt import InteractivePrompt
 from msagent.cli.ui.renderer import Renderer
 from msagent.core.logging import get_logger
+from msagent.skill_evolver.daemon.inbox import print_daemon_notice
 from msagent.utils.version import check_for_updates
 
 if TYPE_CHECKING:
@@ -123,6 +124,9 @@ class Session:
                         # Check for updates in background
                         update_task = asyncio.create_task(self._check_updates_background())
                         await update_task
+
+                        # Proposals the background miner wrote since the user last looked.
+                        print_daemon_notice(console, self.context.state_dir, self.context.working_dir)
 
                     await self._main_loop()
                     status.start()

@@ -355,7 +355,7 @@ def test_episode_weights_cover_all_kinds() -> None:
     assert EPISODE_WEIGHTS["observed_procedure"] == 0.0
     assert all(0.0 < weight <= 1.0 for kind, weight in EPISODE_WEIGHTS.items() if kind != "observed_procedure")
     assert 0.0 < WEAK_CORRECTION_WEIGHT < EPISODE_WEIGHTS["user_correction"]
-    assert FEATURES_VERSION == 4
+    assert FEATURES_VERSION == 5
 
 
 # ----------------------------------------------------------- error_recovery
@@ -489,6 +489,55 @@ def test_error_recovery_evidence_roles_and_error_from_output_text() -> None:
     assert error_item.snippet.startswith("Traceback") and "…" in error_item.snippet
     assert episode.facts["error"] == error_item.snippet
     assert [item.snippet for item in episode.evidence[1:]] == [None, None, None, None]
+    assert episode.facts["detected_by"] == "status"
+
+
+def test_error_recovery_detects_a_failure_reported_inside_an_ok_result() -> None:
+    # An MCP tool answers a failure as text with status ok: the marker is the only signal.
+    failed = _call(
+        "execute_sql",
+        {"db_path": "/w/a.db", "query": "SELECT * FROM T ORDER BY totalDuration"},
+        seq=4,
+        output='{"error": "SQL_EXECUTION_FAILED", "message": "no such column: totalDuration"}',
+    )
+    fixed = _call(
+        "execute_sql",
+        {"db_path": "/w/a.db", "query": "SELECT * FROM T ORDER BY totalTime"},
+        seq=6,
+        output='{"rows": [{"totalTime": 3}]}',
+    )
+
+    (episode,) = extract_episodes(_traj(_turn("run-1", 2, "rank the ops", [failed, fixed])))
+
+    assert episode.kind == "error_recovery"
+    assert episode.facts["detected_by"] == "output_marker" and episode.facts["error_type"] is None
+    assert episode.facts["error"].startswith('{"error": "SQL_EXECUTION_FAILED"')
+    assert episode.facts["args_diff"]["changed"]["query"]["new"].endswith("totalTime")
+    assert _roles(episode) == [
+        ("error", 5, True),
+        ("result", 7, True),
+        ("fixed_call", 6, True),
+        ("failed_call", 4, False),
+        ("task", 2, False),
+    ]
+    # A later call that itself carries a marker recovers nothing.
+    still = _call(
+        "execute_sql",
+        {"db_path": "/w/a.db", "query": "SELECT * FROM T ORDER BY x"},
+        seq=6,
+        output='{"error": "SQL_EXECUTION_FAILED", "message": "no such column: x"}',
+    )
+    assert extract_episodes(_traj(_turn("run-1", 2, "rank the ops", [failed, still]))) == []
+
+
+def test_failed_call_reads_status_then_markers() -> None:
+    failed_call = features_mod._failed_call
+    assert failed_call(_call("bash", {"cmd": "a"}, seq=4, status="error"))
+    assert failed_call(_call("bash", {"cmd": "a"}, seq=4, output="Traceback (most recent call last):\nKeyError"))
+    assert failed_call(_call("bash", {"cmd": "a"}, seq=4, output="[stderr] make: *** [all] Error 2\nexit code 2"))
+    assert not failed_call(_call("bash", {"cmd": "a"}, seq=4, output="3 passed"))
+    # An orphan neither failed nor succeeded.
+    assert not failed_call(_call("bash", {"cmd": "a"}, seq=4, status="orphan"))
 
 
 def test_error_recovery_start_less_calls_cite_one_ref_each() -> None:
@@ -936,6 +985,54 @@ def test_retry_loop_continues_into_a_resume_turn_only() -> None:
         assert extract_episodes(apart) == []
 
 
+def test_retry_loop_search_key_change_after_a_hit_is_not_a_retry() -> None:
+    # Three different statements that each returned rows are analysis, not a loop ...
+    calls = [
+        _call("execute_sql", {"db_path": "/w/a.db", "query": query}, seq=4 + 2 * i, output='{"rows": [{"n": 1}]}')
+        for i, query in enumerate(("SELECT 1", "SELECT 2", "SELECT 3"))
+    ]
+    assert extract_episodes(_traj(_turn("run-1", 2, "analyse", calls))) == []
+    # ... and the same statements after empty outputs are forced changes: a retry loop
+    # on the database file, which is the object of an SQL tool's call.
+    fruitless = [replace(call, output_text="") for call in calls]
+
+    (episode,) = extract_episodes(_traj(_turn("run-1", 2, "analyse", fruitless)))
+
+    assert episode.kind == "retry_loop" and episode.facts["reason"] == "search key varies"
+    assert episode.facts["work_object"] == "/w/a.db" and episode.facts["attempts"] == 3
+
+
+@pytest.mark.parametrize("output", ["No matches found", "0 rows", "nothing found in a.csv", "No results"])
+def test_retry_loop_no_result_text_forces_the_next_search(output: str) -> None:
+    calls = [
+        _call("grep", {"pattern": "hotspot", "path": "a.csv"}, seq=4, output=output),
+        _call("grep", {"pattern": "hot_spot", "path": "a.csv"}, seq=6, output=output),
+        _call("grep", {"pattern": "HotSpot", "path": "a.csv"}, seq=8, output="HotSpot,3"),
+    ]
+
+    (episode,) = extract_episodes(_traj(_turn("run-1", 2, "find it", calls)))
+
+    assert episode.kind == "retry_loop" and episode.facts["reason"] == "search key varies"
+
+
+def test_retry_loop_failure_inside_an_ok_result_is_a_failed_attempt() -> None:
+    failure = '{"error": "SQL_EXECUTION_FAILED", "message": "no such column"}'
+    calls = [
+        _call("execute_sql", {"db_path": "/w/a.db", "query": "SELECT a FROM T"}, seq=4, output=failure),
+        _call("execute_sql", {"db_path": "/w/a.db", "query": "SELECT b FROM T"}, seq=6, output=failure),
+        _call("execute_sql", {"db_path": "/w/a.db", "query": "SELECT c FROM T"}, seq=8, output='{"rows": []}'),
+    ]
+
+    episodes = extract_episodes(_traj(_turn("run-1", 2, "query", calls)))
+
+    # The two failures each recover at seq 8; the chain is a retry loop with a failed attempt.
+    assert _kinds(episodes) == ["error_recovery", "error_recovery", "retry_loop"]
+    retry = episodes[2]
+    assert retry.facts["reason"] == "failed attempt" and retry.facts["statuses"] == ["ok", "ok", "ok"]
+    assert [item.role for item in retry.evidence if item.role in ("error", "result")] == ["error", "error", "result"]
+    assert retry.evidence[1].snippet is not None and retry.evidence[1].snippet.startswith('{"error"')
+
+
 # ----------------------------------------------------------- approval_denied
 
 _TWO_ACTIONS = {
@@ -1207,6 +1304,7 @@ def test_mine_cross_session_reports_closed_patterns() -> None:
     assert episode.tool_sequence == ["bash", "read_file", "grep"]
     assert episode.facts == {
         "ngram": ["bash", "read_file", "grep"],
+        "step_keys": ["bash", "read_file", "grep"],
         "support": 2,
         "thread_ids": ["A", "B"],
     }
@@ -1287,7 +1385,20 @@ def test_mine_cross_session_ignores_catalog_calls() -> None:
 
 
 def test_mine_cross_session_splits_at_a_failed_call() -> None:
-    plain = _procedure("B", ["bash", "read_file", "grep"])
+    # A step key carries the program of a command: the second session runs the same ones.
+    plain = _traj(
+        _turn(
+            "run-1",
+            2,
+            "go",
+            [
+                _call("bash", {"cmd": "a"}, seq=4),
+                _call("read_file", {"path": "x"}, seq=6),
+                _call("grep", {"pattern": "p"}, seq=8),
+            ],
+        ),
+        thread_id="B",
+    )
     for status in ("error", "orphan"):
         broken = _traj(
             _turn(
@@ -1324,7 +1435,10 @@ def test_mine_cross_session_splits_at_a_failed_call() -> None:
 
 
 def test_mine_cross_session_keeps_streams_apart() -> None:
-    plain = _procedure("B", ["bash", "grep"])
+    plain = _traj(
+        _turn("run-1", 2, "go", [_call("bash", {"cmd": "a"}, seq=4), _call("grep", {"pattern": "p"}, seq=6)]),
+        thread_id="B",
+    )
     first = _call("bash", {"cmd": "a"}, seq=4)
     second = _call("grep", {"pattern": "p"}, seq=12)
     # A resume turn continues the sequence of the turn it resumes.
@@ -1529,15 +1643,94 @@ def test_cross_session_evidence_exists_in_source() -> None:
         for item in episode.evidence:
             assert _seq_at(paths[item.ref.source], item.ref.line) == item.ref.seq
     procedures = {tuple(e.tool_sequence): e for e in episodes}
-    shared = procedures[("bash", "read_file", "grep", "bash")]
-    assert shared.facts["thread_ids"] == ["thread-ctrlc", "thread-limit"]
-    assert shared.thread_id == "thread-ctrlc"
-    assert shared.evidence_seq == [2, 4, 5, 7, 8, 10, 11, 13, 14]
-    assert shared.anchors == ["run-1#4", "run-1#7", "run-1#10", "run-1#13"]
-    # The fifth step of the old five-gram failed in one thread: no longer a procedure.
-    assert ("bash", "read_file", "grep", "bash", "bash") not in procedures
-    # thread-reuse, thread-ctrlc, thread-limit, thread-signals
-    assert procedures[("bash", "read_file")].facts["support"] == 4
+    # v5: a step is keyed by tool name plus program, so the bash steps of thread-ctrlc and
+    # thread-limit (different programs) no longer form the v4 four-gram, and the v4
+    # `bash, read_file` pair with support 4 shrinks to the two sessions that both ran msprof.
+    assert ("bash", "read_file", "grep", "bash") not in procedures
+    assert set(procedures) == {("read_file", "grep"), ("bash", "read_file")}
+    reading = procedures[("read_file", "grep")]
+    assert reading.facts["step_keys"] == ["read_file", "grep"] and reading.facts["support"] == 4
+    assert reading.facts["thread_ids"] == ["thread-accuracy", "thread-ctrlc", "thread-limit", "thread-reuse"]
+    assert reading.thread_id == "thread-accuracy"
+    assert reading.evidence_seq == [2, 4, 5, 7, 8] and reading.anchors == ["run-a1#4", "run-a1#7"]
+    profiling = procedures[("bash", "read_file")]
+    assert profiling.facts["step_keys"] == ["bash:msprof", "read_file"] and profiling.facts["support"] == 2
+    assert profiling.facts["thread_ids"] == ["thread-reuse", "thread-signals"]
+    assert profiling.thread_id == "thread-reuse"
+    assert profiling.evidence_seq == [2, 4, 5, 7, 8] and profiling.anchors == ["run-r1#4", "run-r1#7"]
+
+
+def test_step_key_names_the_program_or_the_sql_statement() -> None:
+    key = features_mod._step_key
+    assert key(_call("execute", {"command": "which sqlite3"}, seq=4)) == "execute:which"
+    assert (
+        key(_call("execute", {"command": "cd /mnt/d/out && python3 -c 'import sqlite3'"}, seq=4)) == "execute:python3"
+    )
+    assert (
+        key(_call("execute", {"command": "FOO=1 sudo /usr/bin/make -j4 | tee log; ls"}, seq=4)) == "execute:make+tee+ls"
+    )
+    assert key(_call("execute", {"command": "cd /tmp"}, seq=4)) == "execute"
+    statement = "SELECT name FROM sqlite_master WHERE type='table'"
+    assert (
+        key(_call("execute_sql", {"db_path": "/w/a.db", "query": statement}, seq=4))
+        == "execute_sql:SELECT sqlite_master"
+    )
+    assert key(_call("execute_sql", {"query": "pragma table_info(T)"}, seq=4)) == "execute_sql:PRAGMA"
+    # A search tool's query is a pattern, not SQL; other calls are keyed by their tool name.
+    assert key(_call("grep", {"query": "totalDuration", "path": "a.py"}, seq=4)) == "grep"
+    assert key(_call("ls", {"path": "/w"}, seq=4)) == "ls"
+    assert key(_call("ls", {}, seq=4)) == "ls"
+
+
+def test_mine_cross_session_collapses_runs_and_ignores_one_key_ngrams() -> None:
+    # Three listings in a row are one step; what the two sessions share is
+    # "look around, check for the CLI, use the Python module" — cited by the
+    # first call of each run. Listings alone are no procedure.
+    def session(thread_id: str, *, tail: bool) -> Trajectory:
+        calls = [
+            _call("ls", {"path": "/w"}, seq=4),
+            _call("ls", {"path": "/w/a"}, seq=6),
+            _call("ls", {"path": "/w/b"}, seq=8),
+        ]
+        if tail:
+            calls += [
+                _call("execute", {"command": "which sqlite3"}, seq=10),
+                _call("execute", {"command": "python3 -c 'import sqlite3'"}, seq=12),
+            ]
+        return _traj(_turn("run-1", 2, "go", calls), thread_id=thread_id)
+
+    assert mine_cross_session([session("A", tail=False), session("B", tail=False)]) == []
+
+    (episode,) = mine_cross_session([session("A", tail=True), session("B", tail=True)])
+
+    assert episode.tool_sequence == ["ls", "execute", "execute"]
+    assert episode.facts["step_keys"] == ["ls", "execute:which", "execute:python3"]
+    assert episode.facts["ngram"] == episode.tool_sequence and episode.facts["support"] == 2
+    assert episode.evidence_seq == [2, 4, 5, 10, 11, 12, 13]
+    assert episode.anchors == ["run-1#4", "run-1#10", "run-1#12"]
+    assert [(item.ref.source, item.ref.seq) for item in episode.evidence if item.ref.source == "B.jsonl"] == [
+        ("B.jsonl", 4),
+        ("B.jsonl", 10),
+        ("B.jsonl", 12),
+    ]
+
+
+def test_mine_cross_session_splits_at_a_failure_inside_an_ok_result() -> None:
+    def session(thread_id: str, middle: str) -> Trajectory:
+        calls = [
+            _call("execute", {"command": "which sqlite3"}, seq=4),
+            _call("execute", {"command": "python3 -c 'import sqlite3'"}, seq=6, output=middle),
+            _call("read_file", {"path": "out.txt"}, seq=8),
+        ]
+        return _traj(_turn("run-1", 2, "go", calls), thread_id=thread_id)
+
+    whole = mine_cross_session([session("A", "ok"), session("B", "ok")])
+    assert [e.facts["step_keys"] for e in whole] == [["execute:which", "execute:python3", "read_file"]]
+    # The python3 step failed inside its ok result in one session: no shared three-step procedure.
+    broken = mine_cross_session(
+        [session("A", "Traceback (most recent call last):\nModuleNotFoundError"), session("B", "ok")]
+    )
+    assert [e.facts["step_keys"] for e in broken] == []
 
 
 # ------------------------------------------------------- incidents and gate
@@ -1916,6 +2109,9 @@ def test_observed_procedure_orphan_only_and_ai_claim_yield_no_episode() -> None:
         ("process finished with exit code 2", "exit code 2"),
         ("Exit status 130", "Exit status 130"),
         ("non-zero exit from make", "non-zero exit"),
+        # v5: a failure reported inside an ok result, the MCP shape, and an upper-case failure code.
+        ('{"error": "SQL_EXECUTION_FAILED", "message": "no such column: totalDuration"}', '"error": "'),
+        ("status=TASK_FAILED after 3 retries", "TASK_FAILED"),
     ],
 )
 def test_observed_procedure_error_marker_in_ok_output_drops_chain(output: str, marker: str) -> None:
@@ -1936,8 +2132,19 @@ def test_observed_procedure_error_marker_in_ok_output_drops_chain(output: str, m
 
 
 def test_error_markers_do_not_flag_ordinary_output() -> None:
-    assert len(ERROR_MARKERS) == 10 and r"\berror\b" not in ERROR_MARKERS
-    for text in ("3 passed", "TOTAL_OK", "0 errors", "error-free build", "exit code 0", "60.0", "id,amount\n1,10"):
+    assert len(ERROR_MARKERS) == 12 and r"\berror\b" not in ERROR_MARKERS
+    for text in (
+        "3 passed",
+        "TOTAL_OK",
+        "0 errors",
+        "error-free build",
+        "exit code 0",
+        "60.0",
+        "id,amount\n1,10",
+        # A JSON error field without a text value, and an errors list, are not failures.
+        '{"error": null, "rows": []}',
+        '{"error": "", "errors": []}',
+    ):
         assert features_mod._error_marker(text) is None, text
         (episode,) = _observed(_traj(_turn("run-1", 2, "go", [_ok("bash", {"cmd": "make"}, seq=4, output=text)])))
         assert episode.facts["outcome"] == text
@@ -2016,9 +2223,10 @@ def test_observed_procedure_keeps_streams_apart_and_uses_physical_identity() -> 
 
 
 def test_observed_procedure_coexists_with_retry_loop_and_shares_incident() -> None:
+    # Two fruitless searches (empty output) force the pattern changes: a retry loop.
     searches = [
-        _ok("grep", {"pattern": "hotspot", "path": "a.csv"}, seq=4, output="-"),
-        _ok("grep", {"pattern": "hot_spot", "path": "a.csv"}, seq=6, output="-"),
+        _ok("grep", {"pattern": "hotspot", "path": "a.csv"}, seq=4, output=""),
+        _ok("grep", {"pattern": "hot_spot", "path": "a.csv"}, seq=6, output=""),
         _ok("grep", {"pattern": "HotSpot", "path": "a.csv"}, seq=8, output="HotSpot,3"),
     ]
     procedure = [
@@ -2062,8 +2270,8 @@ def test_zero_weight_chain_joins_an_incident_but_never_bridges_two() -> None:
     calls = [
         _call("bash", {"cmd": "python3 sum.py"}, seq=4, status="error"),
         _ok("bash", {"cmd": "python3 sum.py --fix"}, seq=6, output="60.0"),
-        _ok("grep", {"pattern": "hotspot", "path": "a.csv"}, seq=8, output="-"),
-        _ok("grep", {"pattern": "hot_spot", "path": "a.csv"}, seq=10, output="-"),
+        _ok("grep", {"pattern": "hotspot", "path": "a.csv"}, seq=8, output=""),
+        _ok("grep", {"pattern": "hot_spot", "path": "a.csv"}, seq=10, output=""),
         _ok("grep", {"pattern": "HotSpot", "path": "a.csv"}, seq=12, output="HotSpot,3"),
     ]
     traj = _traj(_turn("run-1", 2, "sum it, then find it", calls))

@@ -222,6 +222,62 @@ def _library_skill(root: Path, name: str, category: str = "default") -> Skill:
     return Skill(name=name, description="Use when testing.", category=category, path=path)
 
 
+def _write_dead_turn(trajectories: Path, thread_id: str) -> Path:
+    """A session whose first LLM call failed: one turn, an llm.error, no tool call, no model reply."""
+    base = {"v": 1, "rec": "r1", "thread_id": thread_id, "agent": AGENT}
+    run_id = "run-dead"
+    error = "Error code: 401 - invalid api key"
+    events = [
+        {
+            **base,
+            "event": "recorder.attach",
+            "ts": "2026-09-10T07:16:59.655+00:00",
+            "seq": 1,
+            "schema_version": 1,
+            "capture_level": "messages",
+            "working_dir": "/w",
+            "model": "default",
+            "approval_mode": "active",
+        },
+        {
+            **base,
+            "event": "turn.start",
+            "ts": "2026-09-10T07:16:59.655+00:00",
+            "seq": 2,
+            "run_id": run_id,
+            "source": "dispatch",
+            "model": "default",
+            "approval_mode": "active",
+            "user_message": "Provide a report",
+        },
+        {
+            **base,
+            "event": "llm.error",
+            "ts": "2026-09-10T07:17:00.856+00:00",
+            "seq": 3,
+            "run_id": run_id,
+            "span_id": "s1",
+            "parent_span_id": None,
+            "error_type": "AuthenticationError",
+            "error": error,
+        },
+        {
+            **base,
+            "event": "turn.end",
+            "ts": "2026-09-10T07:17:00.865+00:00",
+            "seq": 4,
+            "run_id": run_id,
+            "status": "error",
+            "duration_ms": 1209,
+            "error_type": "AuthenticationError",
+            "error": error,
+        },
+    ]
+    target = trajectories / f"{AGENT}_{thread_id}.jsonl"
+    target.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    return target
+
+
 def _write_toolless(trajectories: Path, thread_id: str) -> Path:
     """A trajectory recorded before the ignore_agent fix: no tool.* events."""
     lines: list[str] = []
@@ -502,6 +558,20 @@ async def test_dry_run_keeps_the_note_quiet_when_tools_were_recorded(mine) -> No
     await mine.handler.handle(["--dry-run"])
 
     assert not any("ignore_agent" in line for line in mine.spy.plain)
+
+
+@pytest.mark.asyncio
+async def test_dry_run_names_a_turn_that_died_before_any_call(mine) -> None:
+    # No model reply and no tool call: not a pre-ignore_agent file, so the note
+    # would name the wrong cause; the thread gets its own line instead.
+    _write_dead_turn(mine.trajectories, "thread-dead")
+
+    await mine.handler.handle(["--dry-run"])
+
+    assert mine.spy.error == []
+    assert not any("ignore_agent" in line for line in mine.spy.plain)
+    (line,) = [line for line in mine.spy.plain if line.startswith("[muted]Thread thread-dead")]
+    assert "1 turn(s) ended with AuthenticationError before any tool call or model reply; nothing to mine." in line
 
 
 @pytest.mark.asyncio
@@ -1149,9 +1219,14 @@ async def test_real_run_render_transport_error_is_a_render_error(scripted) -> No
     await scripted.handler.handle([])
 
     assert any(line.startswith("plan create: ") and "more often than scripted" in line for line in scripted.spy.error)
-    summary = next(line for line in scripted.spy.error if line.startswith("Mined "))
-    assert "0 proposals" in summary and "0 failed" in summary
-    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.error
+    # A refused plan is a warning, not an error: the thread ran to its end and its report says why.
+    # Every thread lands in exactly one category of the summary.
+    summary = next(line for line in scripted.spy.warning if line.startswith("Mined "))
+    assert summary == (
+        "Mined 1 threads: 0 proposals, 0 skipped by the gate, 0 nothing to save, 1 rejected at render, 0 failed"
+    )
+    assert not any(line.startswith("Mined ") for line in scripted.spy.error)
+    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
     assert not (scripted.root / "skills" / ".proposals").exists()
 
 
@@ -1233,9 +1308,11 @@ async def test_real_run_first_plan_error_does_not_stop_second(scripted) -> None:
     proposals = scripted.root / "skills" / ".proposals" / SIGNALS_THREAD
     assert (proposals / SECOND_NAME / "SKILL.md").is_file()
     assert not (proposals / GENERATED_NAME).exists()
-    summary = next(line for line in scripted.spy.error if line.startswith("Mined "))
-    assert "1 proposals" in summary and "0 failed" in summary
-    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.error
+    summary = next(line for line in scripted.spy.warning if line.startswith("Mined "))
+    assert summary == (
+        "Mined 1 threads: 1 proposals, 0 skipped by the gate, 0 nothing to save, 0 rejected at render, 0 failed"
+    )
+    assert "Plans: 1 render errors, 0 rejected targets, 0 deferred" in scripted.spy.warning
 
 
 @pytest.mark.asyncio

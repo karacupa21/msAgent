@@ -114,7 +114,7 @@ EpisodeKind = Literal[
 EPISODE_KINDS: frozenset[str] = frozenset(get_args(EpisodeKind))
 # Version of the detector rules and weights, recorded in the provenance of
 # every proposal; bump it when a rule or a weight changes.
-FEATURES_VERSION = 4
+FEATURES_VERSION = 5
 
 # Gate threshold when the skill evolver config does not set
 # min_evidence_score; direct_skill_generation re-exports it. The strong
@@ -165,8 +165,23 @@ ERROR_MARKERS: tuple[str, ...] = (
     r"Permission denied",
     r"(?i)\b(?:exit code|exit status)\s+[1-9]\d*\b",
     r"(?i)\bnon-zero exit\b",
+    # A JSON error field with a non-empty text value: how MCP tools report a
+    # failure inside an ok result ({"error": "SQL_EXECUTION_FAILED", ...}).
+    r'"error"\s*:\s*"(?=[^"])',
+    # An upper-case failure code; \bFAILED\b does not match after "_".
+    r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_FAILED\b",
 )
 _ERROR_MARKER_RES = tuple(re.compile(pattern) for pattern in ERROR_MARKERS)
+
+# Output text saying a search found nothing. Together with an empty output it
+# makes the next change of a search key a forced retry (retry_loop) rather
+# than a refinement after a hit.
+NO_RESULT_MARKERS: tuple[str, ...] = (
+    r"(?i)\bno (?:matches|results|files)\b",
+    r"(?i)\bnothing found\b",
+    r"(?i)\b0 (?:matches|results|rows)\b",
+)
+_NO_RESULT_MARKER_RES = tuple(re.compile(pattern) for pattern in NO_RESULT_MARKERS)
 
 # Why the observed_procedure detector left a chain out (DetectorNote.reason).
 DROP_NO_COMPLETED_CALLS = "no_completed_calls"
@@ -221,10 +236,25 @@ PATH_KEYS: tuple[str, ...] = (
     "filename",
     "directory",
     "dir",
+    # A database file is the object of an SQL tool's call.
+    "db_path",
+    "database",
 )
 # Argument keys holding a shell command; "input" is the legacy wrapper the
 # reader puts around a non-dict tool input.
 COMMAND_KEYS: tuple[str, ...] = ("command", "cmd", "script", "input")
+# Argument keys that may hold an SQL statement. A value counts as SQL only
+# when it starts with one of _SQL_VERBS: a search tool's ``query`` is a pattern.
+SQL_KEYS: tuple[str, ...] = ("sql", "query", "statement")
+_SQL_VERBS: frozenset[str] = frozenset(
+    {"select", "insert", "update", "delete", "pragma", "with", "create", "drop", "alter", "explain", "attach"},
+)
+_SQL_TABLE_RE = re.compile(r"\b(?:from|into|update|table|join)\s+[`\"']?([A-Za-z_][\w.]*)", re.IGNORECASE)
+# Shell command segments are split on these operators; a segment whose program
+# is ``cd`` names no step, and the tokens below never name the program.
+_SHELL_SEGMENT_RE = re.compile(r"&&|\|\||[;|]")
+_SHELL_PREFIX_TOKENS: frozenset[str] = frozenset({"sudo", "time", "env", "exec", "nohup"})
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Keys whose change between attempts means "searching again for a result".
 SEARCH_KEYS: frozenset[str] = frozenset({"pattern", "query", "regex"})
 # Keys that vary without changing what a call does; dropped before comparing.
@@ -530,6 +560,19 @@ def _error_marker(text: str) -> str | None:
     return None
 
 
+def _failed_call(call: ToolCall) -> bool:
+    """Whether a call failed: by its recorded status, or by an ERROR_MARKERS text in an ``ok`` output.
+
+    Tools that report a failure inside their result — an MCP tool answering
+    ``{"error": "SQL_EXECUTION_FAILED", ...}``, a shell tool echoing a
+    traceback — leave ``status == "ok"``; the marker is the only failure
+    signal the record carries for them. An orphan is neither.
+    """
+    if call.status == "error":
+        return True
+    return call.status == "ok" and _error_marker(call.output_text or "") is not None
+
+
 def _canonical(value: Any) -> str:
     """Stable JSON text used to compare and print argument values."""
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
@@ -670,6 +713,65 @@ def _work_object(call: ToolCall) -> str | None:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _command_heads(command: str) -> list[str]:
+    """The program of every segment of a shell command, in order.
+
+    Segments are split on ``&&``, ``||``, ``;`` and ``|``; leading
+    environment assignments and the tokens of _SHELL_PREFIX_TOKENS are
+    skipped; a ``cd`` segment names no program. The program is its base
+    name (``/usr/bin/python3`` → ``python3``).
+    """
+    heads: list[str] = []
+    for segment in _SHELL_SEGMENT_RE.split(command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        program = next(
+            (t for t in tokens if not _ENV_ASSIGNMENT_RE.match(t) and t not in _SHELL_PREFIX_TOKENS),
+            None,
+        )
+        if program is None or program == "cd":
+            continue
+        heads.append(posixpath.basename(program) or program)
+    return heads
+
+
+def _sql_signature(text: str) -> str:
+    """``VERB`` or ``VERB table`` of an SQL statement; ``""`` when ``text`` is not SQL."""
+    tokens = text.split(None, 1)
+    if not tokens or tokens[0].lower() not in _SQL_VERBS:
+        return ""
+    verb = tokens[0].upper()
+    match = _SQL_TABLE_RE.search(text)
+    return f"{verb} {match.group(1)}" if match else verb
+
+
+def _step_key(call: ToolCall) -> str:
+    """The comparison key of one procedure step: the tool name plus what the call does.
+
+    A command argument contributes the program of each shell segment
+    (``cd x && python3 -c …`` → ``execute:python3``, ``which sqlite3`` →
+    ``execute:which``); an SQL argument contributes the statement's verb and
+    first table (``execute_sql:SELECT sqlite_master``); every other call is
+    keyed by its tool name alone. Keyed by names only, every run of the same
+    shell or SQL tool was a "shared procedure" (v4).
+    """
+    args = _normalize_args(call.args) if call.args else {}
+    for key in COMMAND_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            heads = _command_heads(value)
+            return f"{call.name}:{'+'.join(heads)}" if heads else call.name
+    for key in SQL_KEYS:
+        value = args.get(key)
+        if isinstance(value, str):
+            signature = _sql_signature(value)
+            if signature:
+                return f"{call.name}:{signature}"
+    return call.name
 
 
 def _collapse(text: str) -> str:
@@ -827,11 +929,11 @@ def _detect_error_recovery(traj: Trajectory) -> list[Episode]:
         task = _task_item(traj, group[0], required=False)
         for stream in _streams(group):
             for index, (turn, failed) in enumerate(stream):
-                if failed.status != "error":
+                if not _failed_call(failed):
                     continue
                 window = stream[index + 1 : index + 1 + RECOVERY_WINDOW]
                 for offset, (later, candidate) in enumerate(window):
-                    if candidate.name != failed.name or candidate.status != "ok":
+                    if candidate.name != failed.name or candidate.status != "ok" or _failed_call(candidate):
                         continue
                     diff = _args_diff(failed.args, candidate.args)
                     if diff:
@@ -853,6 +955,7 @@ def _detect_error_recovery(traj: Trajectory) -> list[Episode]:
                                     "tool": failed.name,
                                     "error_type": failed.error_type,
                                     "error": error_text,
+                                    "detected_by": "status" if failed.status == "error" else "output_marker",
                                     "args_diff": diff,
                                     "calls_between": offset,
                                     "subagent": failed.subagent,
@@ -977,9 +1080,30 @@ def _search_signature(call: ToolCall) -> str:
     return _canonical({key: value for key, value in args.items() if key in SEARCH_KEYS})
 
 
+def _fruitless(call: ToolCall) -> bool:
+    """Whether an attempt yielded nothing: it failed, its output is empty, or the output says so."""
+    if _failed_call(call):
+        return True
+    text = (call.output_text or "").strip()
+    return not text or any(pattern.search(text) for pattern in _NO_RESULT_MARKER_RES)
+
+
+def _forced_search(calls: list[ToolCall]) -> bool:
+    """Whether a search key changed right after a fruitless attempt.
+
+    A pattern refined after a hit is a fan-out over results, not a retry;
+    the change is forced only when the attempt before it found nothing
+    (:func:`_fruitless`).
+    """
+    return any(
+        _search_signature(previous) != _search_signature(current) and _fruitless(previous)
+        for previous, current in zip(calls, calls[1:])
+    )
+
+
 def _attempt_items(traj: Trajectory, call: ToolCall, *, required: bool) -> list[EvidenceItem]:
     """One attempt of a retry loop: its start and, unless it is an orphan, its result or error."""
-    if call.status == "error":
+    if _failed_call(call):
         end = _end_item(traj, call, "error", snippet=_clip_edges(call.error or call.output_text), required=required)
     else:
         end = _end_item(traj, call, "result", required=required)
@@ -997,9 +1121,9 @@ def _retry_episode(traj: Trajectory, chain: list[_Step], subject: str, head: Tur
         variants.setdefault(_canonical(normalized), _clip_args(normalized))
     if len(variants) < 2:
         return []
-    if any(call.status == "error" for call in calls):
+    if any(_failed_call(call) for call in calls):
         reason = "failed attempt"
-    elif len({_search_signature(call) for call in calls}) > 1:
+    elif _forced_search(calls):
         reason = "search key varies"
     else:
         return []
@@ -1039,9 +1163,13 @@ def _detect_retry_loop(traj: Trajectory) -> list[Episode]:
     calls recorded without arguments have no object and never chain.
     A chain of RETRY_MIN_ATTEMPTS or more calls (orphans count as attempts)
     with at least two distinct normalized argument sets is an episode when
-    an attempt failed, or when the attempts differ in a search key. Equal
-    argument keys alone are not a retry: reading three files is a fan-out,
-    and a parameter sweep that never failed is not a loop.
+    an attempt failed (by status or by an ERROR_MARKERS output, see
+    :func:`_failed_call`), or when a search key changed right after an
+    attempt that found nothing (:func:`_forced_search`). Equal argument
+    keys alone are not a retry: reading three files is a fan-out, a
+    parameter sweep that never failed is not a loop, and a query refined
+    after a result — sixty different SQL statements that each returned rows
+    — is analysis, not a retry.
 
     Required evidence: the first and the last attempt with their results or
     errors; the attempts between them and the group's user message (``task``)
@@ -1175,12 +1303,21 @@ def _detect_skill_gap(traj: Trajectory, index: BM25Index) -> list[Episode]:
     ]
 
 
-def _procedure_segments(traj: Trajectory, *, min_len: int = NGRAM_MIN) -> list[list[_Step]]:
+def _procedure_segments(
+    traj: Trajectory,
+    *,
+    min_len: int = NGRAM_MIN,
+    split_on_markers: bool = True,
+) -> list[list[_Step]]:
     """Runs of ``ok`` domain calls inside one stream: the steps of a procedure.
 
-    Catalog calls are not steps and are skipped; a call that failed or never
-    finished ends the segment, so a repeated failure is never mined as a
-    procedure. Segments shorter than ``min_len`` are dropped.
+    Catalog calls are not steps and are skipped; a call that failed or
+    never finished ends the segment, so a repeated failure is never mined
+    as a procedure. With ``split_on_markers`` an ``ok`` call whose output
+    carries an ERROR_MARKERS text (:func:`_failed_call`) ends the segment
+    too — the cross-session miner's rule; the demo detector keeps such a
+    call in its chain and drops the chain with an ``error_in_output`` note
+    instead. Segments shorter than ``min_len`` are dropped.
     """
     segments: list[list[_Step]] = []
     for group in _groups(traj):
@@ -1189,7 +1326,7 @@ def _procedure_segments(traj: Trajectory, *, min_len: int = NGRAM_MIN) -> list[l
             for turn, call in stream:
                 if call.name in CATALOG_TOOLS:
                     continue
-                if call.status != "ok":
+                if call.status != "ok" or (split_on_markers and _failed_call(call)):
                     if len(current) >= min_len:
                         segments.append(current)
                     current = []
@@ -1293,7 +1430,7 @@ def _detect_observed_procedure(traj: Trajectory, notes: list[DetectorNote] | Non
     gate, never through the score.
     """
     heads = _heads(traj)
-    segments = _procedure_segments(traj, min_len=1)
+    segments = _procedure_segments(traj, min_len=1, split_on_markers=False)
     if not segments:
         calls = [call for call in _flat_calls(traj) if call.name not in CATALOG_TOOLS]
         counts = Counter(call.status for call in calls)
@@ -1426,6 +1563,20 @@ def expand_episode_context(
     return expanded
 
 
+def _key_runs(segment: list[_Step]) -> list[tuple[str, int]]:
+    """``(step key, index)`` of the first call of every run of equal keys in a segment.
+
+    Three listings in a row are one step ("look around"), not three; the
+    first call of the run is the one an episode cites.
+    """
+    runs: list[tuple[str, int]] = []
+    for index, (_, call) in enumerate(segment):
+        key = _step_key(call)
+        if not runs or runs[-1][0] != key:
+            runs.append((key, index))
+    return runs
+
+
 def _is_extended(
     gram: tuple[str, ...],
     frequent: dict[tuple[str, ...], set[str]],
@@ -1446,14 +1597,20 @@ def mine_cross_session(
     *,
     min_support: int = 2,
 ) -> list[Episode]:
-    """Tool-name n-grams (NGRAM_MIN..NGRAM_MAX) shared by ``min_support`` threads.
+    """Step-key n-grams (NGRAM_MIN..NGRAM_MAX) shared by ``min_support`` threads.
 
     Steps come from :func:`_procedure_segments`: calls that returned ``ok``,
-    in one execution context, catalog calls removed. Support counts distinct
-    ``thread_id`` values, so repetition inside one trajectory is not
-    evidence. Only closed patterns are reported: an n-gram is dropped when a
-    longer frequent n-gram containing it has the same support, so a shared
-    five-step procedure yields one episode, not ten. The episode belongs to
+    in one execution context, catalog calls removed. A step is compared by
+    :func:`_step_key` — the tool name plus the program of a command or the
+    verb and table of an SQL statement — and a run of equal keys (``ls, ls,
+    ls``: one tool called repeatedly) is one step, cited by its first call
+    (:func:`_key_runs`); an n-gram of one key is not a procedure. Support
+    counts distinct ``thread_id`` values, so repetition
+    inside one trajectory is not evidence. Only closed patterns are
+    reported: an n-gram is dropped when a longer frequent n-gram containing
+    it has the same support, so a shared five-step procedure yields one
+    episode, not ten. ``facts["ngram"]`` and ``tool_sequence`` list the
+    owner's tool names, ``facts["step_keys"]`` the keys. The episode belongs to
     the first supporting trajectory in input order and cites, as required
     evidence, the steps of that trajectory and of the lexicographically
     first other supporting thread — proof from two sessions, while
@@ -1470,21 +1627,27 @@ def mine_cross_session(
         by_thread.setdefault(traj.thread_id, traj)
     segments_by_thread = {thread_id: _procedure_segments(traj) for thread_id, traj in by_thread.items()}
     support: dict[tuple[str, ...], set[str]] = {}
-    first_seen: dict[tuple[tuple[str, ...], str], tuple[int, int]] = {}
+    # (gram, thread) -> (segment index, index of the first call of each of its runs).
+    first_seen: dict[tuple[tuple[str, ...], str], tuple[int, list[int]]] = {}
     for thread_id, segments in segments_by_thread.items():
         for segment_index, segment in enumerate(segments):
-            names = [call.name for _, call in segment]
+            runs = _key_runs(segment)
+            keys = [key for key, _ in runs]
             for size in range(NGRAM_MIN, NGRAM_MAX + 1):
-                for start in range(len(names) - size + 1):
-                    gram = tuple(names[start : start + size])
+                for start in range(len(keys) - size + 1):
+                    gram = tuple(keys[start : start + size])
+                    if len(set(gram)) < 2:
+                        continue
                     support.setdefault(gram, set()).add(thread_id)
-                    first_seen.setdefault((gram, thread_id), (segment_index, start))
+                    indices = [index for _, index in runs[start : start + size]]
+                    first_seen.setdefault((gram, thread_id), (segment_index, indices))
     frequent = {g: t for g, t in support.items() if len(t) >= min_support}
     order = {thread_id: index for index, thread_id in enumerate(by_thread)}
 
     def steps_of(gram: tuple[str, ...], thread_id: str) -> list[_Step]:
-        segment_index, start = first_seen[gram, thread_id]
-        return segments_by_thread[thread_id][segment_index][start : start + len(gram)]
+        segment_index, indices = first_seen[gram, thread_id]
+        segment = segments_by_thread[thread_id][segment_index]
+        return [segment[index] for index in indices]
 
     heads_by_thread: dict[str, dict[int, Turn]] = {}
     episodes: list[Episode] = []
@@ -1517,9 +1680,10 @@ def mine_cross_session(
                     *(EvidenceItem(_start(by_thread[second], call), "step", True) for _, call in other),
                     *_task_item(owner_traj, owner_head, required=False),
                 ],
-                list(gram),
+                [call.name for _, call in own],
                 {
-                    "ngram": list(gram),
+                    "ngram": [call.name for _, call in own],
+                    "step_keys": list(gram),
                     "support": len(threads),
                     "thread_ids": sorted(threads),
                 },

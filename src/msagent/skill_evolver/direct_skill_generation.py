@@ -67,6 +67,7 @@ from msagent.skill_evolver.pipeline import (
     bundle_preview,
     cited_threads,
     collect_episodes,
+    draft_lines,
     gate_lines,
     load_prompts,
     print_policy_block,
@@ -279,11 +280,14 @@ class DirectSkillGenerationHandler:
             report_dir=decisions_dir(state_dir) if rules.save_decision_report else None,
         )
         result = await run_thread(run, thread)
+        for line in draft_lines(result):
+            console.print(f"[muted]{escape(line)}[/muted]")
         tally = result.tally
         # The plan summary belongs to a thread whose plan loop ran; an early stop already said why.
+        # A refused plan is a warning: the thread ran to its end and its report says why nothing was written.
         if result.stop_message is None and (tally.flagged or tally.plans > 1):
             line = f"Plans: {tally.proposals} proposals, {tally.describe()}"
-            report = console.print_error if tally.render_errors else console.print_info
+            report = console.print_warning if tally.render_errors else console.print_info
             report(line)
         sources = ", ".join(f"{stage}={source}" for stage, source in prompts.variants().items())
         console.print(f"[muted]Prompts: {escape(sources)}[/muted]")

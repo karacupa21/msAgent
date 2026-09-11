@@ -104,6 +104,10 @@ class BundleEpisode:
     status: BundleStatus
     # "E<rank>" of a shown or trimmed block; ``None`` for an excluded episode.
     episode_id: str | None = None
+    # For an excluded episode: the characters its smallest rendering needed
+    # and how many the budget still had when it was tried; ``None`` otherwise.
+    needed: int | None = None
+    room: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +360,8 @@ def build_evidence_bundle(
         attempts = [False]
         if any(not item.required for item in episode.evidence):
             attempts.append(True)
+        needed = 0
+        room = max_chars - total
         for required_only in attempts:
             block, new = _render_block(
                 len(blocks) + 1,
@@ -366,6 +372,7 @@ def build_evidence_bundle(
                 excerpt_chars=excerpt_chars,
             )
             cost = len(block) + (len(_SEPARATOR) if blocks else 0)
+            needed = cost
             if total + cost <= max_chars:
                 blocks.append(block)
                 total += cost
@@ -374,12 +381,17 @@ def build_evidence_bundle(
                 break
         if status == "excluded":
             logger.warning(
-                "bundle: excluded %s episode of thread %r: its required evidence does not fit max_chars=%d",
+                "bundle: excluded %s episode of thread %r: its required evidence does not fit max_chars=%d "
+                "(needs %d chars, %d left)",
                 episode.kind,
                 episode.thread_id,
                 max_chars,
+                needed,
+                room,
             )
-        outcomes.append(BundleEpisode(episode, status, None if status == "excluded" else f"E{len(blocks)}"))
+            outcomes.append(BundleEpisode(episode, status, None, needed=needed, room=room))
+        else:
+            outcomes.append(BundleEpisode(episode, status, f"E{len(blocks)}"))
     shown = {fragment.id: fragment for fragment in by_ref.values()}
     episode_ids = {item.episode_id: item.episode for item in outcomes if item.episode_id}
     return EvidenceBundle(_SEPARATOR.join(blocks), shown, outcomes, episode_ids)

@@ -350,6 +350,10 @@ def test_budget_trims_then_excludes() -> None:
 
     excluded = build_evidence_bundle([light, heavy], [traj], max_chars=len(first_block))
     assert _statuses(excluded) == ["shown", "excluded"]
+    # The excluded episode records what its smallest rendering needed and what the budget had left.
+    shown_item, dropped = excluded.episodes
+    assert (shown_item.needed, shown_item.room) == (None, None)
+    assert dropped.room == 0 and dropped.needed is not None and dropped.needed > 0
     assert excluded.text == first_block
     assert _shown_seqs(excluded) == {8, 12}
     assert excluded.kept == [heavy]

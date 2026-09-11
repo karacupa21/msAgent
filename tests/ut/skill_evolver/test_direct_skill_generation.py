@@ -349,7 +349,7 @@ async def test_handle_writes_proposal_not_library(pipeline: _Pipeline, tmp_path:
         "render": prompt_sha256(RENDER_TEMPLATE),
         "review": prompt_sha256(REVIEW_TEMPLATE),
     }
-    assert provenance["features_version"] == 4
+    assert provenance["features_version"] == 5
     assert provenance["category"] == "default"
     assert provenance["policy"] == {
         "requested": "strict_knowledge",
@@ -562,7 +562,9 @@ async def test_handle_rejects_invalid_skill_twice(pipeline: _Pipeline, tmp_path:
 
     assert len(pipeline.llm.payloads) == 3
     assert pipeline.spy.error[0] == f"plan create: Generated source debugging: {module._REJECTED}"
-    assert pipeline.spy.error[-1] == "Plans: 0 proposals, 1 render errors, 0 rejected targets, 0 deferred"
+    # The plan summary is a warning: the thread ran to its end and the report says why nothing was written.
+    assert pipeline.spy.warning[-1] == "Plans: 0 proposals, 1 render errors, 0 rejected targets, 0 deferred"
+    assert not any(line.startswith("Plans: ") for line in pipeline.spy.error)
     assert any("task identifier" in error for error in pipeline.spy.error)
     assert any("description: must start with" in error for error in pipeline.spy.error)
     assert any("missing section '## Inputs'" in error for error in pipeline.spy.error)
@@ -758,7 +760,7 @@ async def test_handle_first_plan_fails_second_written(pipeline: _Pipeline, tmp_p
     assert not _proposal(tmp_path, SKILL_NAME).exists()
     assert _proposal(tmp_path, SECOND_NAME).is_file()
     assert pipeline.spy.success == [f"Skill proposal saved to {_proposal(tmp_path, SECOND_NAME)}"]
-    assert pipeline.spy.error[-1] == "Plans: 1 proposals, 1 render errors, 0 rejected targets, 0 deferred"
+    assert pipeline.spy.warning[-1] == "Plans: 1 proposals, 1 render errors, 0 rejected targets, 0 deferred"
 
 
 @pytest.mark.asyncio

@@ -248,7 +248,7 @@ def test_build_provenance_maps_episodes_candidates_and_evidence() -> None:
     )
 
     assert provenance["provenance_version"] == PROVENANCE_VERSION == 4
-    assert provenance["features_version"] == FEATURES_VERSION == 4
+    assert provenance["features_version"] == FEATURES_VERSION == 5
     assert provenance["thread_ids"] == [THREAD_ID, "thread-other"]
     assert provenance["sources"] == {SOURCE: "/t/a.jsonl", "thread-other.jsonl": "/t/b.jsonl"}
     # Extracted episodes with their bundle outcome; unshown events have no id.
@@ -322,11 +322,11 @@ def test_build_provenance_records_v4_fields() -> None:
     provenance = _provenance()
 
     assert provenance["provenance_version"] == PROVENANCE_VERSION == 4
-    assert provenance["features_version"] == FEATURES_VERSION == 4
+    assert provenance["features_version"] == FEATURES_VERSION == 5
     assert provenance["policy"] == POLICY
     assert provenance["demo"] is False
     assert provenance["config"] == CONFIG
-    assert provenance["versions"] == {"features": 4, "provenance": 4, "config_schema": 2, "prompts_contract": 2}
+    assert provenance["versions"] == {"features": 5, "provenance": 4, "config_schema": 2, "prompts_contract": 2}
     assert provenance["prompt_hashes"] == PROMPT_HASHES
     assert provenance["prompt_variants"] == PROMPT_VARIANTS
     assert provenance["quality_review"] == QUALITY_REVIEW
@@ -536,7 +536,7 @@ def test_write_proposal_writes_skill_and_provenance(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == SKILL
     provenance = json.loads((path.parent / "provenance.json").read_text(encoding="utf-8"))
     assert REQUIRED_PROVENANCE_KEYS <= set(provenance)
-    assert provenance["features_version"] == 4
+    assert provenance["features_version"] == 5
     assert provenance["provenance_version"] == 4
     assert provenance["demo"] is False and provenance["policy"]["selection"] == "strict_knowledge"
     assert sorted(p.name for p in path.parent.iterdir()) == ["SKILL.md", "provenance.json"]

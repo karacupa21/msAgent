@@ -469,6 +469,10 @@ async def test_render_and_review_lost_constraint_fails_after_one_correction(fake
     assert result.content is None
     assert result.review is not None and result.review.verdict == "fail"
     assert result.corrected is False
+    # The first round's findings and the corrected draft survive for the record.
+    assert result.initial_issues == ["lost_condition: the missing-dependency error condition is gone"]
+    assert result.review_record()["initial_issues"] == result.initial_issues
+    assert result.draft is not None and result.draft.strip() == SKILL_WITH_FLAG.strip()
 
 
 @pytest.mark.asyncio

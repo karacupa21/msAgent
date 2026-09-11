@@ -92,6 +92,7 @@ OS_VERSION = platform.version()
 
 # For skill-evolver component
 CONFIG_SKILL_EVOLVER_FILE_NAME = Path(f"{CONFIG_DIR_NAME}/config.skill.evolver.yml")
+CONFIG_SKILL_DAEMON_FILE_NAME = Path(f"{CONFIG_DIR_NAME}/config.skill.daemon.yml")
 SKILL_EVOLVER_CONFIG_FOLDER_NAME = "skill-evolver"
 
 # For trajectory-recorder component

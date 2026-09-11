@@ -11,6 +11,7 @@ import shutil
 
 from msagent.core.paths import AppPaths
 from msagent.core.constants import (
+    CONFIG_SKILL_DAEMON_FILE_NAME,
     CONFIG_SKILL_EVOLVER_FILE_NAME,
     SKILL_EVOLVER_CONFIG_FOLDER_NAME,
     CONFIG_TRAJECTORY_RECORDER_FILE_NAME,
@@ -242,9 +243,12 @@ def _seed_skill_evolver_defaults(paths: AppPaths) -> None:
         default_root = Path(str(files("resources") / "configs" / "default"))
         seeds: list[tuple[Path, Path]] = []
 
-        config_source = default_root / CONFIG_SKILL_EVOLVER_FILE_NAME.name
-        if config_source.is_file():
-            seeds.append((config_source, paths.config_dir / CONFIG_SKILL_EVOLVER_FILE_NAME.name))
+        # The background miner has its own file: the evolver config is schema_version 2
+        # with extra="forbid", so a new section there would force a schema bump.
+        for name in (CONFIG_SKILL_EVOLVER_FILE_NAME.name, CONFIG_SKILL_DAEMON_FILE_NAME.name):
+            config_source = default_root / name
+            if config_source.is_file():
+                seeds.append((config_source, paths.config_dir / name))
 
         component_source_root = default_root / SKILL_EVOLVER_CONFIG_FOLDER_NAME
         if component_source_root.is_dir():

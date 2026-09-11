@@ -187,7 +187,7 @@ class GateSection(_Section):
 
 class EvidenceSection(_Section):
     excerpt_max_chars: StrictInt = 1000
-    bundle_max_chars: StrictInt = 30000
+    bundle_max_chars: StrictInt = 60000
     surrounding_events: StrictInt = 2
     cross_session_limit: StrictInt = CROSS_SESSION_LIMIT
 
@@ -227,6 +227,7 @@ class PromptsSection(_Section):
 class DiagnosticsSection(_Section):
     save_decision_report: StrictBool = True
     save_evidence_text: StrictBool = False
+    save_rejected_drafts: StrictBool = True
 
 
 class SkillEvolverConfig(_Section):
@@ -291,7 +292,7 @@ class DirectSkillGenerationConfig:
     policy: str = "strict_knowledge"
     min_evidence_score: float = DEFAULT_MIN_EVIDENCE_SCORE
     excerpt_max_chars: int = 1000
-    bundle_max_chars: int = 30000
+    bundle_max_chars: int = 60000
     surrounding_events: int = 2
     cross_session_limit: int = CROSS_SESSION_LIMIT
     on_nothing: str = "expand_context_once"
@@ -306,6 +307,7 @@ class DirectSkillGenerationConfig:
     review_prompt: str = DEFAULT_PROMPT_FILE
     save_decision_report: bool = True
     save_evidence_text: bool = False
+    save_rejected_drafts: bool = True
     # Legacy replay variant folder (prompts/<active>/); never used for policy.
     active: str = DEFAULT_VARIANT
     # Legacy v1 key; drives the legacy prompt rule in prompts.py.
@@ -351,6 +353,7 @@ class DirectSkillGenerationConfig:
             "diagnostics": {
                 "save_decision_report": self.save_decision_report,
                 "save_evidence_text": self.save_evidence_text,
+                "save_rejected_drafts": self.save_rejected_drafts,
             },
             "source": self.source,
             "legacy_format": self.legacy_format,
@@ -389,6 +392,7 @@ def _from_model(
         review_prompt=model.prompts.review,
         save_decision_report=model.diagnostics.save_decision_report,
         save_evidence_text=model.diagnostics.save_evidence_text,
+        save_rejected_drafts=model.diagnostics.save_rejected_drafts,
         active=active,
         prompt_file=prompt_file,
         legacy_format=legacy_format,
@@ -566,6 +570,7 @@ class EffectiveRules:
     output_root: Path
     save_decision_report: bool
     save_evidence_text: bool
+    save_rejected_drafts: bool
 
     def as_record(self) -> dict[str, Any]:
         record = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -591,4 +596,5 @@ def effective_rules(cfg: DirectSkillGenerationConfig, *, working_dir: Path) -> E
         output_root=output_root(cfg, working_dir),
         save_decision_report=cfg.save_decision_report,
         save_evidence_text=cfg.save_evidence_text,
+        save_rejected_drafts=cfg.save_rejected_drafts,
     )

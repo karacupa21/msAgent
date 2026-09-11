@@ -1,0 +1,24 @@
+# Skill Daemon: background SKILL.md mining, schema_version 1. Runs the same pipeline as
+# /skill-mine, on a schedule, without a user. Output stays an inactive proposal under
+# .proposals/ — promotion is still a human decision through /skill-review.
+schema_version: 1
+enabled: false                      # off by default: an unattended run spends LLM calls
+schedule:
+  quiet_period_seconds: 900         # a trajectory must be idle this long to count as finished (no session.end event exists)
+  min_interval_seconds: 1800        # refuse a tick sooner than this after the previous one; keep it below the timer period
+  max_threads_per_tick: 5           # threads mined per tick, across all projects
+  max_llm_calls_per_tick: 60        # hard ceiling; the tick stops before it would exceed this
+scope:
+  projects: all                     # all | listed
+  project_dirs: []                  # working directories, used only when projects: listed
+  agents: []                        # empty -> every agent that has recorded trajectories
+mining:
+  model: null                       # null -> the model the CLI would resolve; else an alias from config.llms.yml
+  policy: strict_knowledge          # strict_knowledge | reusable_workflow (same values as --policy)
+  demo: false                       # the demonstration overlay of /skill-mine --demo
+  remine_on:                        # when a thread the ledger already knows is mined again
+    - content_change                #   the file grew: the user continued the thread
+    - methodology_change            #   prompts, FEATURES_VERSION or the effective policy moved
+  max_attempts: 3                   # consecutive failures of one file before it is excluded for good
+notify:
+  inbox: true                       # write <project state>/skill-evolver/daemon-inbox.json for the CLI banner
