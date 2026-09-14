@@ -13,10 +13,12 @@ from __future__ import annotations
 from msagent.exgraph.config import (
     ENV_DISABLED,
     ENV_ENABLED,
+    ENV_EVIDENCE_MODE,
     ExgraphConfig,
     is_exgraph_enabled,
     load_exgraph_config,
     reset_config_cache,
+    resolve_evidence_mode,
 )
 
 
@@ -45,4 +47,21 @@ def test_disabled_wins_over_enabled(monkeypatch) -> None:
     monkeypatch.setenv(ENV_DISABLED, "1")
     reset_config_cache()
     assert is_exgraph_enabled(force_reload=True) is False
+    assert resolve_evidence_mode(force_reload=True) == "episodes"
     reset_config_cache()
+
+
+def test_model_default_mode_is_hybrid() -> None:
+    assert ExgraphConfig().evidence_mode == "hybrid"
+
+
+def test_evidence_mode_env_overrides_when_on(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_ENABLED, "1")
+    monkeypatch.delenv(ENV_DISABLED, raising=False)
+    monkeypatch.setenv(ENV_EVIDENCE_MODE, "graph")
+    reset_config_cache()
+    assert resolve_evidence_mode(force_reload=True) == "graph"
+    monkeypatch.setenv(ENV_EVIDENCE_MODE, "episodes")
+    assert resolve_evidence_mode(force_reload=True) == "episodes"
+    monkeypatch.setenv(ENV_EVIDENCE_MODE, "not-a-mode")
+    assert resolve_evidence_mode(force_reload=True) == "hybrid"

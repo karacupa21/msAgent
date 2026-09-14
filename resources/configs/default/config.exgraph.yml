@@ -1,11 +1,22 @@
 # Experience graph. Off on merge so Skill Evolver behaviour is unchanged.
 # Opt in: enabled: true  — or MSAGENT_EXGRAPH_ENABLED=1
 # Force off: MSAGENT_EXGRAPH_DISABLED=1 (wins over everything)
-version: "1.0"
+# evidence_mode (when on): episodes | hybrid | graph
+#   override: MSAGENT_EXGRAPH_EVIDENCE_MODE
+# version token is required by tests/ut/configs/test_config_versions.py
+version: "__APP_VERSION__"
 enabled: false
+evidence_mode: hybrid
 outcome:
   policy: v1
 output:
   directory: exgraph
 skills:
   enabled: true
+similar:
+  min_tools: 0.5
+  min_tokens: 0.25
+  text_backend: bm25              # bm25 | jaccard  (tool path stays Jaccard)
+insight:
+  min_support: 2
+  fill_llm: true                  # CountingLlm after a written proposal; fail-open if budget/overlay empty

@@ -35,6 +35,8 @@ CONFIG_FILE_NAME = "config.exgraph.yml"
 ENV_CONFIG_PATH = "MSAGENT_EXGRAPH_CONFIG"
 ENV_DISABLED = "MSAGENT_EXGRAPH_DISABLED"
 ENV_ENABLED = "MSAGENT_EXGRAPH_ENABLED"
+ENV_EVIDENCE_MODE = "MSAGENT_EXGRAPH_EVIDENCE_MODE"
+EVIDENCE_MODES = ("episodes", "hybrid", "graph")
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -56,6 +58,23 @@ class SkillScanConfig(BaseModel):
     )
 
 
+class SimilarConfig(BaseModel):
+    min_tools: float = Field(default=0.5, description="Minimum tool-path Jaccard")
+    min_tokens: float = Field(default=0.25, description="Minimum user-text score (BM25 or Jaccard)")
+    text_backend: str = Field(
+        default="bm25",
+        description="bm25 = skill_evolver.retrieval; jaccard = legacy token sets",
+    )
+
+
+class InsightConfig(BaseModel):
+    min_support: int = Field(default=2, description="Minimum recipe support for an Insight")
+    fill_llm: bool = Field(
+        default=True,
+        description="After a written proposal, fill empty Insight.text via CountingLlm",
+    )
+
+
 class ExgraphConfig(BaseModel):
     version: str = Field(default="1.0")
     enabled: bool = Field(
@@ -65,6 +84,12 @@ class ExgraphConfig(BaseModel):
     outcome: OutcomeConfig = Field(default_factory=OutcomeConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     skills: SkillScanConfig = Field(default_factory=SkillScanConfig)
+    similar: SimilarConfig = Field(default_factory=SimilarConfig)
+    insight: InsightConfig = Field(default_factory=InsightConfig)
+    evidence_mode: str = Field(
+        default="hybrid",
+        description="episodes = bundle only; hybrid = bundle + appendix; graph = relations first",
+    )
 
     @property
     def is_active(self) -> bool:
@@ -94,6 +119,24 @@ def is_exgraph_enabled(*, force_reload: bool = False) -> bool:
     if _env_enabled():
         return True
     return load_exgraph_config(force_reload=force_reload).enabled
+
+
+def resolve_evidence_mode(*, force_reload: bool = False) -> str:
+    """Effective classify evidence mode.
+
+    Disabled / kill switch => ``episodes``. Env
+    ``MSAGENT_EXGRAPH_EVIDENCE_MODE`` overrides YAML. Unknown values
+    fall back to ``hybrid`` when the graph is on.
+    """
+    if not is_exgraph_enabled(force_reload=force_reload):
+        return "episodes"
+    raw = os.environ.get(ENV_EVIDENCE_MODE, "").strip().lower()
+    if raw in EVIDENCE_MODES:
+        return raw
+    mode = str(load_exgraph_config(force_reload=force_reload).evidence_mode or "").strip().lower()
+    if mode in EVIDENCE_MODES:
+        return mode
+    return "hybrid"
 
 
 def _candidate_paths() -> list[Path]:

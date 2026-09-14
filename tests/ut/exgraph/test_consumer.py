@@ -108,7 +108,7 @@ def test_appendix_has_relations_not_episode_echo(tmp_path: Path, monkeypatch) ->
     assert "Episodes:" not in text
     assert "user_correction weight" not in text
     assert "Evidence:" not in text
-    assert len(text) <= 1000
+    assert len(text) <= 1600
 
 
 def test_appendix_empty_when_killed(tmp_path: Path, monkeypatch) -> None:

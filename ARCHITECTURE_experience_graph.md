@@ -1,6 +1,6 @@
 # Experience Graph — Architecture
 
-Status: P0 + P0.5 + P1 + P1.1 + **P1.2** (`src/msagent/exgraph/`), schema version 2.
+Status: P0–P2.3 + **P2.2** classify A/B harness, schema version 3.
 Branch: `feature/experience-graph`.
 
 ## 1. Purpose
@@ -27,11 +27,11 @@ renaming cases.
 ## 3. Schema
 
 Nodes: `Thread`, `TaskAnchor`, `Case`, `Step`, `SubagentRun`, `SkillDoc`,
-`Episode`, workspace `Recipe`.
+`Episode`, workspace `Recipe`, workspace `Insight`.
 
 Edges: `HAS_TASK`, `CONTAINS`, `NEXT_CASE`, `HAS_STEP`, `PARENT_OF`,
 `DELEGATES`, `IN_SUBAGENT`, `DERIVED_SKILL`, `HAS_EPISODE`, `FIXED_BY`,
-`INSTANTIATES`.
+`INSTANTIATES`, `SIMILAR_TO`, `INSIGHT_OF`, `INSIGHT_SKILL`.
 
 Case payload: `x`, `y`, `r` (`golden` | `warning` | `unknown`), `sigma`
 (tool path, errors, retries, approvals, tokens).
@@ -50,7 +50,9 @@ src/msagent/exgraph/
     cases.py        L0 ingest
     skills.py       SkillDoc path scan
     enrich.py       extract_episodes + FIXED_BY
-    workspace.py    mine_cross_session overlay
+    workspace.py    mine_cross_session overlay + similar + insight
+    similar.py      SIMILAR_TO (Jaccard, same agent)
+    insight.py      Insight from accepted SkillDoc + recipe
     consumer.py     classify appendix (relations only)
     store.py        JSONL shards under <state>/exgraph/
     export.py       build | show | export | viz
@@ -87,10 +89,19 @@ overlay** of recipes + accepted SkillDocs. That is not P1.1.
 Detectors stay in `skill_evolver.features`. Exgraph only materializes
 them. `select_trajectories` / `CROSS_SESSION_LIMIT=20` stay evolver-owned.
 
-After the evolver builds its episode bundle it calls
-`attach_stored_graph`: persist this thread (no extra JSONL pool) and
-append the stored-graph section. Fail-open. `valid_seq` remains the
-evolver episode seqs.
+After the evolver builds its episode bundle, `pipeline.run_thread`
+calls `attach_stored_graph` (the only hook). Fail-open. `valid_seq`
+remains the evolver episode seqs. Mode is **not** on
+`config.skill.evolver.yml` (`extra: forbid`).
+
+| `evidence_mode` | Classify string |
+|---|---|
+| `episodes` | original bundle; no shard |
+| `hybrid` | bundle + relation appendix (default when the graph is on) |
+| `graph` | relations first, then `## Episode bundle (supporting, citable)` |
+
+`MSAGENT_EXGRAPH_EVIDENCE_MODE` overrides YAML. Disabled / kill switch
+forces `episodes`.
 
 P1.1 appendix contains **only relations**:
 
@@ -99,7 +110,10 @@ P1.1 appendix contains **only relations**:
 - SkillDoc name / status / path;
 - recipes this thread instantiates (`ngram`, support, other thread ids).
 
-It does **not** repeat episode kinds. Cap 1000 characters. No `Evidence:`
+P2.0 also lists `Similar cases` (same-agent tool+text Jaccard) and
+`Insights` (accepted SkillDoc + recipe support≥2). No invented prose.
+
+It does **not** repeat episode kinds. Cap 1600 characters. No `Evidence:`
 seqs.
 
 ## 7. Default off (P1.2 merge)
@@ -115,12 +129,23 @@ Skill Evolver unless someone opts in.
 Checked live on CLI `build`, `remember_thread`, the evolver hook, and the
 appendix. Inspection `show`/`export` of an existing shard still works.
 
-## 8. Later (not this zip)
+P2.1b: after a thread writes at least one proposal, `pipeline` asks
+`fill_overlay_insights` to set `Insight.text` with the same
+`CountingLlm` (limit still `max_llm_calls_per_thread`). Overlay rebuild
+stays deterministic. Empty overlay / exhausted budget / kill switch /
+`insight.fill_llm: false` → structural Insight only. Daemon is a third
+`run_thread` caller; it inherits the hook. FEATURES_VERSION is 5
+(evolver-owned).
 
-`SIMILAR_TO`, Insight, `/exgraph` slash command, live retrieval,
-embeddings, graph databases, outcome policy v2 (`recovered`),
-argument-aware recipes (change `mine_cross_session`, do not fork it),
-online `finish_turn` enqueue, live `/skill-mine` quality A/B (P1.2).
+P2.2: `python -m msagent.exgraph.export ab` compares classify *input*
+under evidence_mode values. No LLM, no new node types. Full proposal
+A/B is `/skill-mine` twice with `MSAGENT_EXGRAPH_EVIDENCE_MODE`.
+
+## 8. Later
+
+BM25 text similar via `skill_evolver.retrieval.tokenize` (P2.3), live
+`/skill-mine` A/B (P2.2), argument-aware `mine_cross_session`, outcome
+`recovered`, `finish_turn` enqueue, dense+RRF, `/exgraph` slash command.
 
 ## 9. CLI
 

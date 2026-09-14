@@ -9,7 +9,7 @@
 # Override per user: copy this file to <MSAGENT_HOME>/config/ and edit.
 # Kill switch without editing files: set MSAGENT_TRAJECTORY_DISABLED=1.
 # Explicit config path: set MSAGENT_TRAJECTORY_CONFIG=/path/to/file.yml.
-version: "1.0"
+version: "__APP_VERSION__"
 
 # Is recorder enabled?.
 enabled: true
